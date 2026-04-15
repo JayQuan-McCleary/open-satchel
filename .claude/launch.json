@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dev",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["electron-vite", "dev"],
+      "port": 5173
+    },
+    {
+      "name": "preview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["electron-vite", "preview"],
+      "port": 5173
+    },
+    {
+      "name": "harness",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "--config", "harness/vite.config.ts"],
+      "port": 5179
+    }
+  ]
+}
