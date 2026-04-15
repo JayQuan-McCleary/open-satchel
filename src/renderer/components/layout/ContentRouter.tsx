@@ -171,7 +171,7 @@ function injectFadeIn() {
   styleInjected = true
   const style = document.createElement('style')
   style.textContent = `
-    @keyframes afpe-fadeInUp {
+    @keyframes satchel-fadeInUp {
       from { opacity: 0; transform: translateY(12px); }
       to   { opacity: 1; transform: translateY(0); }
     }
@@ -244,7 +244,7 @@ function EmptyState() {
         alignItems: 'center',
         maxWidth: 640,
         width: '100%',
-        animation: 'afpe-fadeInUp 0.4s ease both',
+        animation: 'satchel-fadeInUp 0.4s ease both',
       }}>
         {/* Header */}
         <div style={{
@@ -254,7 +254,7 @@ function EmptyState() {
           color: 'var(--text-primary)',
           lineHeight: 1,
         }}>
-          AFPE
+          Open Satchel
         </div>
         <div style={{
           fontSize: 14,
@@ -262,7 +262,7 @@ function EmptyState() {
           marginTop: 6,
           fontWeight: 500,
         }}>
-          Actually Free PDF Editor
+          Free. Private. No email required.
         </div>
         <div style={{
           fontSize: 12,
@@ -272,7 +272,7 @@ function EmptyState() {
           lineHeight: 1.5,
           maxWidth: 400,
         }}>
-          Open any file: PDF, Word, Excel, Images, Markdown, Code, CSV, HTML, and more
+          Open any file: PDF, Word, Excel, Markdown, Code, CSV, HTML, and more
         </div>
 
         {/* Quick Action Cards */}
@@ -283,7 +283,7 @@ function EmptyState() {
           flexWrap: 'wrap',
           justifyContent: 'center',
           width: '100%',
-          animation: 'afpe-fadeInUp 0.4s ease 0.1s both',
+          animation: 'satchel-fadeInUp 0.4s ease 0.1s both',
         }}>
           {quickActions.map((action) => (
             <QuickActionCard key={action.label} action={action} />
@@ -296,7 +296,7 @@ function EmptyState() {
             marginTop: 36,
             width: '100%',
             maxWidth: 500,
-            animation: 'afpe-fadeInUp 0.4s ease 0.2s both',
+            animation: 'satchel-fadeInUp 0.4s ease 0.2s both',
           }}>
             <div style={{
               display: 'flex',
@@ -371,7 +371,7 @@ function EmptyState() {
           marginTop: 36,
           width: '100%',
           maxWidth: 340,
-          animation: 'afpe-fadeInUp 0.4s ease 0.3s both',
+          animation: 'satchel-fadeInUp 0.4s ease 0.3s both',
         }}>
           <div style={{
             fontSize: 12,

@@ -1,7 +1,7 @@
-import type { AFPEAPI } from './index'
+import type { SatchelAPI } from './index'
 
 declare global {
   interface Window {
-    api: AFPEAPI
+    api: SatchelAPI
   }
 }

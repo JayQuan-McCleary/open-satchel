@@ -53,7 +53,7 @@ export async function pdfToWord(bytes: Uint8Array, opts: PdfToWordOpts = {}): Pr
   })
 
   const doc = new Document({
-    creator: 'Actually Free PDF Editor',
+    creator: 'Open Satchel',
     title: 'Converted from PDF',
     sections: [{ children }],
   })

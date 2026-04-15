@@ -49,4 +49,4 @@ const api = {
 
 contextBridge.exposeInMainWorld('api', api)
 
-export type AFPEAPI = typeof api
+export type SatchelAPI = typeof api

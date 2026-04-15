@@ -96,9 +96,9 @@ export async function signPdf(
   })()
   const withPlaceholder = plainAddPlaceholder({
     pdfBuffer: Buffer.from(normalized),
-    reason: opts.reason ?? 'Signed with AFPE',
+    reason: opts.reason ?? 'Signed with Open Satchel',
     location: opts.location ?? 'Local',
-    name: opts.signerName ?? 'AFPE User',
+    name: opts.signerName ?? 'Open Satchel User',
     contactInfo: opts.contactInfo ?? '',
     signatureLength: 8192,
   })

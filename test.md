@@ -1,6 +1,6 @@
-# Hello from AFPE
+# Hello from Open Satchel
 
-This is a **Markdown** document being edited in the *Actually Free PDF Editor*.
+This is a **Markdown** document being edited in *Open Satchel*.
 
 ## Features
 - Multi-format support
@@ -10,7 +10,7 @@ This is a **Markdown** document being edited in the *Actually Free PDF Editor*.
 
 ## Code Example
 ```js
-const greeting = "Hello, AFPE!";
+const greeting = "Hello, Open Satchel!";
 console.log(greeting);
 ```
 

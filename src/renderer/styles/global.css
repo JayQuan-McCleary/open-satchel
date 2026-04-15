@@ -51,7 +51,7 @@ html, body, #root {
 }
 
 /* Hide fabric annotations overlay when the user toggles Hide Annotations */
-.afpe-hide-annotations .canvas-container { display: none !important; }
+.satchel-hide-annotations .canvas-container { display: none !important; }
 
 button {
   border: none;

@@ -34,7 +34,7 @@ export default function PdfViewer({ tabId }: FormatViewerProps) {
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
-    el.classList.toggle('afpe-hide-annotations', hideAnnotations)
+    el.classList.toggle('satchel-hide-annotations', hideAnnotations)
   }, [hideAnnotations])
 
   const visiblePages = state?.pages.filter((p) => !p.deleted) ?? []

@@ -1,7 +1,7 @@
 {
-  "name": "actually-free-pdf-editor",
-  "version": "1.0.0",
-  "description": "AFPE - Actually Free Document Editor. Edit PDFs, Word docs, spreadsheets, markdown, code, and more.",
+  "name": "open-satchel",
+  "version": "0.1.0",
+  "description": "Open Satchel — a free, private editor for documents, spreadsheets, and other formats corpos lock behind paywalls. No subscription, no email required.",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
@@ -11,8 +11,14 @@
   },
   "keywords": [
     "pdf",
+    "docx",
+    "xlsx",
     "editor",
-    "free"
+    "free",
+    "private",
+    "no-email",
+    "offline",
+    "open-satchel"
   ],
   "author": "",
   "license": "MIT",
