@@ -1,8 +1,6 @@
-// Compare two PDFs by page text. Returns per-page diff summary. Visual
-// comparison (pixel-diff) is a separate feature we can add later — most
-// users actually want text-level diff which this provides.
+// Compare two PDFs: text-level diff (LCS) and pixel-level diff (canvas).
 
-import { extractText } from './pdfOps'
+import { extractText, pdfToImages } from './pdfOps'
 
 export type DiffOp = 'equal' | 'insert' | 'delete'
 
@@ -76,5 +74,71 @@ export async function comparePdfs(leftBytes: Uint8Array, rightBytes: Uint8Array)
   return {
     pages,
     summary: { totalLines: total, inserted: ins, deleted: del, unchanged: eq, similarity: total === 0 ? 1 : eq / total },
+  }
+}
+
+// ── Pixel-level diff ───────────────────────────────────────────────
+
+export interface PixelDiffResult {
+  diffImage: Uint8Array
+  changedPixels: number
+  changePercent: number
+  width: number
+  height: number
+}
+
+/** Pixel-diff two PDF pages. Renders both, compares, produces red overlay of changes. */
+export async function pixelDiffPages(
+  leftBytes: Uint8Array,
+  rightBytes: Uint8Array,
+  pageIndex: number,
+  opts?: { scale?: number; threshold?: number }
+): Promise<PixelDiffResult | null> {
+  const scale = opts?.scale ?? 1.5
+  const threshold = opts?.threshold ?? 30
+
+  const [leftImgs, rightImgs] = await Promise.all([
+    pdfToImages(leftBytes, { scale }),
+    pdfToImages(rightBytes, { scale }),
+  ])
+  if (pageIndex >= leftImgs.length || pageIndex >= rightImgs.length) return null
+
+  const [leftBm, rightBm] = await Promise.all([
+    createImageBitmap(new Blob([leftImgs[pageIndex]], { type: 'image/png' })),
+    createImageBitmap(new Blob([rightImgs[pageIndex]], { type: 'image/png' })),
+  ])
+
+  const w = Math.max(leftBm.width, rightBm.width)
+  const h = Math.max(leftBm.height, rightBm.height)
+
+  const lc = new OffscreenCanvas(w, h), lx = lc.getContext('2d')!
+  lx.drawImage(leftBm, 0, 0)
+  const ld = lx.getImageData(0, 0, w, h)
+
+  const rc = new OffscreenCanvas(w, h), rx = rc.getContext('2d')!
+  rx.drawImage(rightBm, 0, 0)
+  const rd = rx.getImageData(0, 0, w, h)
+  leftBm.close(); rightBm.close()
+
+  const dc = new OffscreenCanvas(w, h), dx = dc.getContext('2d')!
+  const dd = dx.createImageData(w, h)
+  const d = dd.data, lp = ld.data, rp = rd.data
+  let changed = 0
+
+  for (let i = 0; i < lp.length; i += 4) {
+    const dist = Math.abs(lp[i] - rp[i]) + Math.abs(lp[i+1] - rp[i+1]) + Math.abs(lp[i+2] - rp[i+2])
+    if (dist > threshold) {
+      d[i] = 255; d[i+1] = 60; d[i+2] = 60; d[i+3] = 180
+      changed++
+    }
+  }
+
+  dx.putImageData(dd, 0, 0)
+  const blob = await dc.convertToBlob({ type: 'image/png' })
+  return {
+    diffImage: new Uint8Array(await blob.arrayBuffer()),
+    changedPixels: changed,
+    changePercent: Math.round((changed / (w * h)) * 10000) / 100,
+    width: w, height: h,
   }
 }

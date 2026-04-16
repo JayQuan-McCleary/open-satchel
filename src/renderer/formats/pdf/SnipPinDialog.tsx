@@ -12,13 +12,8 @@ interface Props {
   onClose: () => void
 }
 
-function downloadBytes(name: string, bytes: Uint8Array, mime = 'image/png') {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const blob = new Blob([bytes as any], { type: mime })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a'); a.href = url; a.download = name
-  document.body.appendChild(a); a.click(); document.body.removeChild(a)
-  URL.revokeObjectURL(url)
+async function downloadBytes(_name: string, bytes: Uint8Array, _mime = 'image/png') {
+  await window.api.file.saveAs(bytes)
 }
 
 export default function SnipPinDialog({ tabId, onClose }: Props) {
@@ -93,6 +88,13 @@ export default function SnipPinDialog({ tabId, onClose }: Props) {
           <div style={{ display:'flex', gap:8, alignItems:'center' }}>
             <label style={{ fontSize: 11 }}>Page</label>
             <input data-testid="snip-page" type="number" min={1} max={state.pageCount} value={pageIdx + 1} onChange={(e) => setPageIdx(Math.max(0, Math.min(state.pageCount - 1, Number(e.target.value) - 1)))} style={{ width: 50 }} />
+            <button data-testid="snip-screen" onClick={async () => {
+              if (!window.api?.capture?.screen) return
+              const png = await window.api.capture.screen()
+              if (!png) return
+              const blob = new Blob([png], { type: 'image/png' })
+              setPngUrl(URL.createObjectURL(blob))
+            }} style={{ padding: '6px 12px', background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius: 4, cursor:'pointer', fontSize: 11 }}>Capture Screen</button>
             <button data-testid="snip-go" disabled={!rect} onClick={snip} style={{ padding: '6px 12px', background:'var(--accent)', color:'var(--bg-primary)', border:'none', borderRadius: 4, cursor: rect ? 'pointer' : 'not-allowed' }}>Snip</button>
             {snipUrl && <button data-testid="snip-download" onClick={download} style={{ padding: '6px 12px', background:'var(--bg-surface)', border:'none', borderRadius: 4, cursor:'pointer' }}>Download</button>}
             <button onClick={onClose} style={{ fontSize: 18, background:'transparent', border:'none', color:'var(--text-muted)', cursor:'pointer' }}>✕</button>

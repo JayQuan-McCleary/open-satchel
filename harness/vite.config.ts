@@ -10,7 +10,11 @@ export default defineConfig({
   server: {
     port: 5179,
     strictPort: true,
+    fs: {
+      allow: [resolve(__dirname, '..')]
+    }
   },
+  publicDir: resolve(__dirname, '../test-pdfs'),
   resolve: {
     alias: {
       '@renderer': resolve(__dirname, '../src/renderer'),

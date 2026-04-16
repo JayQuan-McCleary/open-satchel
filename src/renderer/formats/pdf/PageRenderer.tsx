@@ -5,6 +5,8 @@ import { useFormatStore } from '../../stores/formatStore'
 import type { PdfFormatState } from './index'
 import FabricCanvas from './FabricCanvas'
 import FormFieldRenderer from './FormFieldRenderer'
+import EditableTextLayer from './EditableTextLayer'
+import { RulersGuides } from '../../components/editor/RulersGuides'
 
 interface Props {
   tabId: string
@@ -23,8 +25,20 @@ export default function PageRenderer({
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const zoom = useUIStore((s) => s.zoom)
+  const tool = useUIStore((s) => s.tool)
+  const showRulers = useUIStore((s) => s.showRulers)
+  const showGrid = useUIStore((s) => s.showGrid)
   const pdfBytes = useFormatStore((s) => (s.data[tabId] as PdfFormatState | undefined)?.pdfBytes)
+  const hasPendingEdits = useFormatStore((s) => {
+    const state = s.data[tabId] as PdfFormatState | undefined
+    const page = state?.pages.find(p => p.pageIndex === pageIndex) as any
+    return !!page?._textLayerEdits?.length
+  })
   const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null)
+  const [canvasReady, setCanvasReady] = useState(true)
+
+  // When pdfBytes change, mark canvas as not ready until re-render completes
+  useEffect(() => { setCanvasReady(false) }, [pdfBytes])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -37,15 +51,9 @@ export default function PageRenderer({
         const page = await pdfDoc.getPage(pageIndex + 1)
         if (cancelled) { page.cleanup(); return }
 
-        // Combine the page's intrinsic rotation (from PDF metadata) with user rotation.
-        // pdfjs's getViewport({ rotation }) OVERRIDES the intrinsic rotation, so we
-        // must add them ourselves to preserve the page's intended orientation.
         const intrinsicRotation = (page as any).rotate || 0
         const effectiveRotation = (intrinsicRotation + rotation) % 360
 
-        // Render each page at its own natural size at the current zoom.
-        // Don't force-normalize widths — that cuts off content on pages with
-        // different aspect ratios. Each container flexes to fit its own page.
         const viewport = page.getViewport({
           scale: zoom * window.devicePixelRatio,
           rotation: effectiveRotation
@@ -61,6 +69,7 @@ export default function PageRenderer({
 
         const ctx = canvas.getContext('2d')!
         await page.render({ canvasContext: ctx, viewport }).promise
+        if (!cancelled) setCanvasReady(true)
         page.cleanup()
       } catch (err) {
         if (!cancelled) console.error('Failed to render page:', err)
@@ -93,7 +102,9 @@ export default function PageRenderer({
           pointerEvents: 'none',
           position: 'absolute',
           top: 0,
-          left: 0
+          left: 0,
+          opacity: (hasPendingEdits || !canvasReady) ? 0 : 1,
+          transition: 'opacity 0.2s'
         }}
       />
       {dimensions && pdfBytes && (
@@ -106,12 +117,31 @@ export default function PageRenderer({
           pageHeight={dimensions.height}
         />
       )}
-      {dimensions && (
+      {dimensions && tool === 'edit_text' && (
+        <EditableTextLayer
+          tabId={tabId}
+          pageIndex={pageIndex}
+          pdfDoc={pdfDoc}
+          width={dimensions.width}
+          height={dimensions.height}
+        />
+      )}
+      {dimensions && tool !== 'edit_text' && (
         <FabricCanvas
           tabId={tabId}
           pageIndex={pageIndex}
           width={dimensions.width}
           height={dimensions.height}
+          pdfDoc={pdfDoc}
+        />
+      )}
+      {dimensions && (showRulers || showGrid) && (
+        <RulersGuides
+          fabricCanvas={null}
+          width={dimensions.width}
+          height={dimensions.height}
+          showRulers={showRulers}
+          showGrid={showGrid}
         />
       )}
     </div>

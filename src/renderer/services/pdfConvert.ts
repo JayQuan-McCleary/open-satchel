@@ -32,42 +32,99 @@ export async function pdfToText(bytes: Uint8Array): Promise<string> {
     .join('\n\n--- Page Break ---\n\n')
 }
 
-// ---------- PDF → Excel (one sheet per page, text lines as rows) ----------
+// ---------- PDF → Excel (structural table detection) ----------
+
+/** Detect column boundaries from text item X-positions using gap analysis */
+function detectColumns(items: { x: number; width: number }[], pageWidth: number): number[] {
+  if (items.length < 2) return [0, pageWidth]
+  // Collect all left edges and right edges
+  const edges: number[] = []
+  for (const it of items) {
+    edges.push(it.x)
+    edges.push(it.x + it.width)
+  }
+  edges.sort((a, b) => a - b)
+
+  // Find gaps between clusters of edges — these are column separators
+  const gaps: { pos: number; size: number }[] = []
+  for (let i = 1; i < edges.length; i++) {
+    const gap = edges[i] - edges[i - 1]
+    if (gap > 15) { // Minimum gap to be a column boundary
+      gaps.push({ pos: (edges[i] + edges[i - 1]) / 2, size: gap })
+    }
+  }
+
+  // Build column boundaries: [0, gap1, gap2, ..., pageWidth]
+  const boundaries = [0, ...gaps.sort((a, b) => a.pos - b.pos).map(g => g.pos), pageWidth]
+
+  // Deduplicate boundaries that are too close together
+  const deduped = [boundaries[0]]
+  for (let i = 1; i < boundaries.length; i++) {
+    if (boundaries[i] - deduped[deduped.length - 1] > 20) {
+      deduped.push(boundaries[i])
+    }
+  }
+  return deduped
+}
+
+/** Assign a text item to a column based on its X position */
+function assignColumn(x: number, boundaries: number[]): number {
+  for (let i = 0; i < boundaries.length - 1; i++) {
+    if (x >= boundaries[i] && x < boundaries[i + 1]) return i
+  }
+  return boundaries.length - 2
+}
 
 export async function pdfToExcel(bytes: Uint8Array): Promise<Uint8Array> {
   const pages = await extractText(bytes)
   const wb = XLSX.utils.book_new()
-  pages.forEach((p, i) => {
-    // Build rows from text items clustered by y (each row ≈ one line).
-    // Split each line on runs of whitespace into columns so column-like
-    // content lands in separate cells.
-    const sorted = [...p.items].sort((a, b) => (a.y - b.y) || (a.x - b.x))
-    const rows: string[][] = []
-    let currentY = sorted[0]?.y
-    let row: string[] = []
-    let accumulator = ''
-    for (const it of sorted) {
-      if (currentY !== undefined && Math.abs(it.y - currentY) > 4) {
-        if (accumulator.trim()) row.push(accumulator.trim())
-        if (row.length) rows.push(row)
-        row = []; accumulator = ''
-        currentY = it.y
-      }
-      if (accumulator && !accumulator.endsWith(' ') && !it.str.startsWith(' ')) accumulator += ' '
-      accumulator += it.str
-    }
-    if (accumulator.trim()) row.push(accumulator.trim())
-    if (row.length) rows.push(row)
 
-    // Second pass: split multi-space runs into separate cells for each row
-    const splitRows = rows.map((r) => {
-      const joined = r.join(' ')
-      return joined.split(/\s{2,}/)
-    })
-    const ws = XLSX.utils.aoa_to_sheet(splitRows)
-    XLSX.utils.book_append_sheet(wb, ws, `Page ${i + 1}`)
+  pages.forEach((p, pageIdx) => {
+    if (p.items.length === 0) {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['(empty page)']]), `Page ${pageIdx + 1}`)
+      return
+    }
+
+    // Step 1: Detect column structure from X-position clustering
+    const maxX = Math.max(...p.items.map(it => it.x + it.width))
+    const colBoundaries = detectColumns(p.items, maxX + 20)
+    const numCols = colBoundaries.length - 1
+
+    // Step 2: Group items into rows by Y-position
+    const sorted = [...p.items].sort((a, b) => (a.y - b.y) || (a.x - b.x))
+    const lines: { y: number; items: typeof sorted }[] = []
+    let curY = sorted[0].y
+    let curItems = [sorted[0]]
+
+    for (let i = 1; i < sorted.length; i++) {
+      const it = sorted[i]
+      if (Math.abs(it.y - curY) > 4) {
+        lines.push({ y: curY, items: curItems })
+        curItems = [it]
+        curY = it.y
+      } else {
+        curItems.push(it)
+      }
+    }
+    lines.push({ y: curY, items: curItems })
+
+    // Step 3: Build grid — place each text item in its detected column
+    const rows: string[][] = []
+    for (const line of lines) {
+      const row = new Array(numCols).fill('')
+      for (const item of line.items) {
+        const col = assignColumn(item.x, colBoundaries)
+        if (row[col]) row[col] += ' '
+        row[col] += item.str.trim()
+      }
+      // Only add if row has any content
+      if (row.some(c => c.trim())) rows.push(row)
+    }
+
+    const ws = XLSX.utils.aoa_to_sheet(rows)
+    XLSX.utils.book_append_sheet(wb, ws, `Page ${pageIdx + 1}`)
   })
-  // XLSX.write returns a string/Uint8Array depending on type.
+
   const arr = XLSX.write(wb, { type: 'array', bookType: 'xlsx' })
   return new Uint8Array(arr as ArrayBuffer)
 }

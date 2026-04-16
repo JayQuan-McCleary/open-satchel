@@ -38,8 +38,22 @@ const api = {
       ipcRenderer.invoke('font:import'),
     getBytes: (fontId: string): Promise<Uint8Array> =>
       ipcRenderer.invoke('font:getBytes', fontId),
+    subset: (fontId: string, glyphs: string): Promise<Uint8Array> =>
+      ipcRenderer.invoke('font:subset', fontId, glyphs),
     remove: (fontId: string): Promise<void> =>
       ipcRenderer.invoke('font:remove', fontId)
+  },
+  folder: {
+    pick: (extensions?: string[]): Promise<{ path: string; name: string; bytes: Uint8Array }[] | null> =>
+      ipcRenderer.invoke('file:pickFolder', extensions),
+  },
+  print: {
+    pdf: (opts?: { silent?: boolean; printBackground?: boolean; copies?: number }): Promise<boolean> =>
+      ipcRenderer.invoke('print:pdf', opts),
+  },
+  capture: {
+    screen: (): Promise<Uint8Array | null> =>
+      ipcRenderer.invoke('capture:screen'),
   },
   on: (channel: string, callback: (...args: unknown[]) => void) => {
     ipcRenderer.on(channel, (_event, ...args) => callback(...args))

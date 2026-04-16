@@ -3,7 +3,18 @@
 // group, dropdown, signature. All positions in PDF points (origin
 // bottom-left), matching the rest of pdfOps.
 
-import { PDFDocument } from 'pdf-lib'
+import { PDFDocument, PDFDict, PDFName, PDFString, PDFArray, PDFHexString } from 'pdf-lib'
+
+export interface FormFieldActions {
+  /** JavaScript to calculate field value (e.g., "AFSimple_Calculate('SUM', ['field1','field2'])") */
+  calculate?: string
+  /** JavaScript to format field display (e.g., "AFNumber_Format(2, 0, 0, 0, '$', true)") */
+  format?: string
+  /** JavaScript to validate field value (e.g., "AFRange_Validate(true, 0, true, 100)") */
+  validate?: string
+  /** JavaScript to execute on keystroke */
+  keystroke?: string
+}
 
 export interface FormFieldSpec {
   kind: 'text' | 'checkbox' | 'radio' | 'dropdown' | 'signature'
@@ -14,6 +25,7 @@ export interface FormFieldSpec {
   options?: string[] // for dropdown & radio (option labels)
   required?: boolean
   readOnly?: boolean
+  actions?: FormFieldActions
 }
 
 export async function addFormFields(bytes: Uint8Array, specs: FormFieldSpec[]): Promise<Uint8Array> {
@@ -85,6 +97,35 @@ export async function addFormFields(bytes: Uint8Array, specs: FormFieldSpec[]): 
       }
     }
   }
+  // Attach JavaScript actions to fields that have them
+  for (const spec of specs) {
+    if (!spec.actions) continue
+    try {
+      const field = form.getField(spec.name)
+      if (!field) continue
+      const fieldRef = field.ref
+      const fieldDict = doc.context.lookup(fieldRef) as PDFDict
+      if (!fieldDict) continue
+
+      const aaDict = PDFDict.withContext(doc.context)
+      const makeJsAction = (js: string) => {
+        const actionDict = PDFDict.withContext(doc.context)
+        actionDict.set(PDFName.of('S'), PDFName.of('JavaScript'))
+        actionDict.set(PDFName.of('JS'), PDFHexString.fromText(js))
+        return actionDict
+      }
+
+      if (spec.actions.calculate) aaDict.set(PDFName.of('C'), makeJsAction(spec.actions.calculate))
+      if (spec.actions.format) aaDict.set(PDFName.of('F'), makeJsAction(spec.actions.format))
+      if (spec.actions.validate) aaDict.set(PDFName.of('V'), makeJsAction(spec.actions.validate))
+      if (spec.actions.keystroke) aaDict.set(PDFName.of('K'), makeJsAction(spec.actions.keystroke))
+
+      if (aaDict.entries().length > 0) {
+        fieldDict.set(PDFName.of('AA'), aaDict)
+      }
+    } catch { /* skip if field not found or dict access fails */ }
+  }
+
   return await doc.save()
 }
 

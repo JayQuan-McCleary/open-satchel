@@ -2,7 +2,7 @@
 // they are trivially testable and reusable between dialogs, IPC handlers,
 // and batch automation. Nothing in here touches the DOM or stores.
 
-import { PDFDocument, PDFName, PDFDict, PDFArray, PDFString, PDFNumber, rgb, degrees, StandardFonts } from 'pdf-lib'
+import { PDFDocument, PDFName, PDFDict, PDFArray, PDFString, PDFNumber, PDFRawStream, rgb, degrees, StandardFonts } from 'pdf-lib'
 
 // ---------- Metadata ----------
 
@@ -60,6 +60,75 @@ export async function stripMetadata(bytes: Uint8Array): Promise<Uint8Array> {
   doc.setKeywords([])
   doc.setCreator('')
   doc.setProducer('')
+  return await doc.save()
+}
+
+export interface SanitizeOptions {
+  stripMetadata?: boolean
+  stripXmp?: boolean
+  stripJavaScript?: boolean
+  stripAttachments?: boolean
+  stripHiddenLayers?: boolean
+  stripAnnotations?: boolean
+  stripForms?: boolean
+}
+
+/** Deep sanitize — remove hidden info from PDF catalog for privacy/compliance */
+export async function sanitizePdf(bytes: Uint8Array, opts: SanitizeOptions = {}): Promise<Uint8Array> {
+  const doc = await PDFDocument.load(bytes)
+  const catalog = doc.catalog
+
+  // Strip basic metadata
+  if (opts.stripMetadata !== false) {
+    doc.setTitle(''); doc.setAuthor(''); doc.setSubject('')
+    doc.setKeywords([]); doc.setCreator(''); doc.setProducer('')
+  }
+
+  // Strip XMP metadata stream
+  if (opts.stripXmp !== false) {
+    try { catalog.delete(PDFName.of('Metadata')) } catch { /* may not exist */ }
+  }
+
+  // Strip JavaScript and actions
+  if (opts.stripJavaScript !== false) {
+    try { catalog.delete(PDFName.of('OpenAction')) } catch {}
+    try { catalog.delete(PDFName.of('AA')) } catch {}
+    // Walk pages to remove per-page actions
+    for (let i = 0; i < doc.getPageCount(); i++) {
+      try { doc.getPage(i).node.delete(PDFName.of('AA')) } catch {}
+    }
+    // Remove /Names/JavaScript tree
+    try {
+      const names = catalog.lookup(PDFName.of('Names')) as PDFDict | undefined
+      if (names) names.delete(PDFName.of('JavaScript'))
+    } catch {}
+  }
+
+  // Strip embedded file attachments
+  if (opts.stripAttachments !== false) {
+    try {
+      const names = catalog.lookup(PDFName.of('Names')) as PDFDict | undefined
+      if (names) names.delete(PDFName.of('EmbeddedFiles'))
+    } catch {}
+  }
+
+  // Strip optional content (hidden layers)
+  if (opts.stripHiddenLayers !== false) {
+    try { catalog.delete(PDFName.of('OCProperties')) } catch {}
+  }
+
+  // Strip annotations from all pages
+  if (opts.stripAnnotations) {
+    for (let i = 0; i < doc.getPageCount(); i++) {
+      try { doc.getPage(i).node.delete(PDFName.of('Annots')) } catch {}
+    }
+  }
+
+  // Strip interactive forms (AcroForm + XFA)
+  if (opts.stripForms) {
+    try { catalog.delete(PDFName.of('AcroForm')) } catch {}
+  }
+
   return await doc.save()
 }
 
@@ -139,16 +208,35 @@ export interface BatesOptions {
   fontSize?: number      // default 10
   color?: [number, number, number] // rgb 0..1; default black
   margin?: number        // pt from edge, default 20
+  skipOdd?: boolean      // skip odd pages
+  skipEven?: boolean     // skip even pages
+  skipPages?: number[]   // specific 0-based page indices to skip
+  ranges?: { from: number; to: number; start?: number }[] // restart numbering at range boundaries
 }
 
 export async function applyBatesNumbering(bytes: Uint8Array, opts: BatesOptions = {}): Promise<Uint8Array> {
   const { prefix = '', suffix = '', start = 1, digits = 6, position = 'footer-right', fontSize = 10, color = [0, 0, 0], margin = 20 } = opts
+  const skipSet = new Set(opts.skipPages || [])
   const doc = await PDFDocument.load(bytes)
   const font = await doc.embedFont(StandardFonts.Helvetica)
   const pages = doc.getPages()
+
+  // Build a counter map: for each page, what number should it get?
+  let counter = start
   pages.forEach((page, i) => {
+    // Check skip conditions
+    if (opts.skipOdd && i % 2 === 0) return    // 0-indexed: even index = odd page
+    if (opts.skipEven && i % 2 === 1) return
+    if (skipSet.has(i)) return
+
+    // Check if we need to restart counter at a range boundary
+    if (opts.ranges) {
+      const range = opts.ranges.find(r => r.from === i)
+      if (range) counter = range.start ?? start
+    }
+
     const { width, height } = page.getSize()
-    const n = String(start + i).padStart(digits, '0')
+    const n = String(counter).padStart(digits, '0')
     const text = `${prefix}${n}${suffix}`
     const textW = font.widthOfTextAtSize(text, fontSize)
     const textH = font.heightAtSize(fontSize)
@@ -157,6 +245,7 @@ export async function applyBatesNumbering(bytes: Uint8Array, opts: BatesOptions 
     if (position.endsWith('right')) x = width - margin - textW
     else if (position.endsWith('center')) x = (width - textW) / 2
     page.drawText(text, { x, y, size: fontSize, font, color: rgb(color[0], color[1], color[2]) })
+    counter++
   })
   return await doc.save()
 }
@@ -259,12 +348,60 @@ export async function rotatePages(bytes: Uint8Array, angle: 90 | 180 | 270, page
 
 // ---------- Compress / Optimize ----------
 
-export async function compressPdf(bytes: Uint8Array): Promise<Uint8Array> {
-  // pdf-lib's save with object streams + updateMetadata=false cuts ~10–30%
-  // on PDFs with many small indirect objects. For deeper savings (image
-  // re-sampling, font subsetting) we'd need pdfjs to re-encode streams —
-  // not doing that here since it would require a heavy worker pass.
+export async function compressPdf(
+  bytes: Uint8Array,
+  opts?: { imageQuality?: number; maxDimension?: number }
+): Promise<Uint8Array> {
+  const quality = opts?.imageQuality ?? 0.65
+  const maxDim = opts?.maxDimension ?? 1500
+
   const doc = await PDFDocument.load(bytes)
+
+  // Walk all indirect objects and downsample JPEG images
+  const context = doc.context
+  for (const [ref, obj] of context.enumerateIndirectObjects()) {
+    if (!(obj instanceof PDFRawStream)) continue
+    const dict = obj.dict
+    const subtype = dict.get(PDFName.of('Subtype'))
+    if (!subtype || subtype.toString() !== '/Image') continue
+    const filter = dict.get(PDFName.of('Filter'))
+    if (!filter || filter.toString() !== '/DCTDecode') continue
+
+    // This is a JPEG image — extract dimensions
+    const imgW = (dict.get(PDFName.of('Width')) as PDFNumber | undefined)?.asNumber() ?? 0
+    const imgH = (dict.get(PDFName.of('Height')) as PDFNumber | undefined)?.asNumber() ?? 0
+    if (imgW <= maxDim && imgH <= maxDim) continue // Already small enough
+
+    try {
+      // Decode the JPEG
+      const jpegBytes = obj.contents
+      const blob = new Blob([jpegBytes], { type: 'image/jpeg' })
+      const bitmap = await createImageBitmap(blob)
+
+      // Calculate scaled dimensions (preserving aspect ratio)
+      const scale = Math.min(maxDim / bitmap.width, maxDim / bitmap.height, 1)
+      const newW = Math.round(bitmap.width * scale)
+      const newH = Math.round(bitmap.height * scale)
+
+      // Re-encode at reduced size and quality
+      const canvas = new OffscreenCanvas(newW, newH)
+      const ctx = canvas.getContext('2d')!
+      ctx.drawImage(bitmap, 0, 0, newW, newH)
+      bitmap.close()
+
+      const outBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality })
+      const outBytes = new Uint8Array(await outBlob.arrayBuffer())
+
+      // Replace stream contents and update dimensions
+      obj.contents = outBytes
+      dict.set(PDFName.of('Width'), PDFNumber.of(newW))
+      dict.set(PDFName.of('Height'), PDFNumber.of(newH))
+      dict.set(PDFName.of('Length'), PDFNumber.of(outBytes.length))
+    } catch {
+      // Skip images that fail to decode — non-critical
+    }
+  }
+
   return await doc.save({
     useObjectStreams: true,
     updateFieldAppearances: false,

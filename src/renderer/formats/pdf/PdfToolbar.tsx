@@ -106,6 +106,8 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
               <RBtn text="Select" active={ui.tool === 'select'} onClick={() => ui.setTool('select')} />
             </RibbonGroup>
             <RibbonGroup label="Text">
+              <RBtn text="Edit Text" active={ui.tool === 'edit_text'}
+                onClick={() => ui.setTool(ui.tool === 'edit_text' ? 'select' : 'edit_text')} />
               <RBtn text="Add Text" active={ui.tool === 'text'} onClick={() => ui.setTool('text')} />
               <div style={{ display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap' }}>
                 <FontPicker />
@@ -243,7 +245,7 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
               <span style={{ fontSize: 9, color: 'var(--text-muted)' }}>Ctrl+F</span>
             </RibbonGroup>
             <RibbonGroup label="Print">
-              <RBtn text="Print" onClick={() => window.print()} />
+              <RBtn text="Print" onClick={() => window.api?.print?.pdf ? window.api.print.pdf() : window.print()} />
               <span style={{ fontSize: 9, color: 'var(--text-muted)' }}>Ctrl+P</span>
             </RibbonGroup>
             <RibbonGroup label="Text Recognition">
@@ -347,6 +349,13 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
               <RBtn text="Batch Rename" onClick={() => setShowBatchRename(true)} />
               <RBtn text="Batch Print" onClick={() => setShowBatchPrint(true)} />
               <RBtn text="File Collect" onClick={() => setShowFileCollect(true)} />
+            </RibbonGroup>
+            <RibbonGroup label="Layout">
+              <RBtn text="Form Designer" active={ui.tool === 'form_designer'}
+                onClick={() => ui.setTool(ui.tool === 'form_designer' ? 'select' : 'form_designer')} />
+              <RBtn text="Rulers" active={ui.showRulers} onClick={() => ui.toggleRulers()} />
+              <RBtn text="Grid" active={ui.showGrid} onClick={() => ui.toggleGrid()} />
+              <RBtn text="Layers" active={ui.showLayers} onClick={() => ui.toggleLayers()} />
             </RibbonGroup>
             <RibbonGroup label="View">
               <RBtn text={vf.autoScroll ? 'Stop Auto Scroll' : 'Auto Scroll'}

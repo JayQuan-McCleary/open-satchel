@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import type { FormatViewerProps } from '../types'
 import { useFormatStore } from '../../stores/formatStore'
 import { useTabStore } from '../../stores/tabStore'
+import { useHistoryStore } from '../../stores/historyStore'
 import type { PdfFormatState, PdfPageState } from './index'
 import { PDFDocument, degrees } from 'pdf-lib'
 
@@ -45,6 +46,8 @@ export default function PdfPageManager({ tabId, onClose }: Props) {
   }
 
   const updatePages = (updater: (pages: PdfPageState[]) => PdfPageState[]) => {
+    const cur = useFormatStore.getState().data[tabId] as PdfFormatState | undefined
+    if (cur) useHistoryStore.getState().pushUndo({ type: 'pages', tabId, pages: JSON.parse(JSON.stringify(cur.pages)) })
     useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({
       ...prev,
       pages: updater(prev.pages)

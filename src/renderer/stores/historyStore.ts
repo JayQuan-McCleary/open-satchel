@@ -1,9 +1,19 @@
 import { create } from 'zustand'
+import type { PdfPageState } from '../formats/pdf'
 
-interface HistoryEntry {
+interface FabricEntry {
+  type: 'fabric'
   pageIndex: number
   fabricJSON: Record<string, unknown>
 }
+
+interface PagesEntry {
+  type: 'pages'
+  tabId: string
+  pages: PdfPageState[]
+}
+
+export type HistoryEntry = FabricEntry | PagesEntry
 
 interface HistoryState {
   undoStack: HistoryEntry[]

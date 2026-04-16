@@ -26,15 +26,17 @@ import {
   applyFillLineTool, applyFillDotTool, applyFillDateTool,
   applyFillInitialsTool, applyFillTimestampTool,
 } from '../../components/editor/FillSignTools'
+import type { PDFDocumentProxy } from 'pdfjs-dist'
 
 interface Props {
   tabId: string
   pageIndex: number
   width: number
   height: number
+  pdfDoc?: PDFDocumentProxy | null
 }
 
-export default function FabricCanvas({ tabId, pageIndex, width, height }: Props) {
+export default function FabricCanvas({ tabId, pageIndex, width, height, pdfDoc }: Props) {
   const wrapperRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const fabricRef = useRef<FabricCanvasClass | null>(null)
@@ -64,10 +66,18 @@ export default function FabricCanvas({ tabId, pageIndex, width, height }: Props)
     return page?.fabricJSON ?? null
   })
 
+  // Custom properties to preserve when serializing Fabric objects to JSON.
+  // These are used by various tools (edit text, form designer, etc.)
+  const CUSTOM_PROPS = [
+    '__editTextBlock', '__originalText', '__operatorIndices', '__originalTextRuns',
+    '__pdfBounds', '__blockFontName', '__blockFontSize',
+    '__customFontId', '__fieldType', '__fieldName',
+  ]
+
   const saveState = useCallback(() => {
     const fc = fabricRef.current
     if (!fc) return
-    const json = fc.toJSON() as Record<string, unknown>
+    const json = fc.toJSON(CUSTOM_PROPS) as Record<string, unknown>
     useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({
       ...prev,
       pages: prev.pages.map((p) =>
@@ -242,6 +252,7 @@ export default function FabricCanvas({ tabId, pageIndex, width, height }: Props)
       case 'replace_text_marker': applyReplaceTextMarkerTool(patchedCanvas as any, saveState); break
       case 'measure': applyMeasureTool(patchedCanvas as any, { unit: 'pt' }, saveState); break
       case 'form_designer': applyFormDesignerTool(patchedCanvas as any, { onSave: saveState }); break
+      // edit_text is handled by EditableTextLayer in PageRenderer — FabricCanvas is hidden in that mode
       // ---- Fill & Sign quick stamps ----
       case 'fill_cross': applyFillCrossTool(patchedCanvas as any, '#1e66f5', saveState); break
       case 'fill_check': applyFillCheckTool(patchedCanvas as any, '#40a02b', saveState); break

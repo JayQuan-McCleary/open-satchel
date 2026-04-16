@@ -1,7 +1,10 @@
 import { useEffect } from 'react'
 import { useUIStore } from '../stores/uiStore'
 import { useTabStore } from '../stores/tabStore'
+import { useHistoryStore } from '../stores/historyStore'
+import { useFormatStore } from '../stores/formatStore'
 import { openFile, saveFile, saveFileAs, closeActiveTab } from '../App'
+import type { PdfFormatState } from '../formats/pdf'
 
 export function useKeyboardShortcuts() {
   const setTool = useUIStore((s) => s.setTool)
@@ -31,6 +34,48 @@ export function useKeyboardShortcuts() {
       if (ctrl && shift && e.key === 'S') { e.preventDefault(); saveFileAs(); return }
       if (ctrl && !shift && e.key === 's') { e.preventDefault(); saveFile(); return }
       if (ctrl && e.key === 'w') { e.preventDefault(); closeActiveTab(); return }
+
+      // Undo/Redo for page-level operations
+      if (ctrl && !shift && e.key === 'z') {
+        const hs = useHistoryStore.getState()
+        if (hs.undoStack.length > 0) {
+          const entry = hs.undoStack[hs.undoStack.length - 1]
+          if (entry.type === 'pages') {
+            e.preventDefault()
+            // Save current state to redo before restoring
+            const cur = useFormatStore.getState().data[entry.tabId] as PdfFormatState | undefined
+            const currentSnapshot = cur ? JSON.parse(JSON.stringify(cur.pages)) : []
+            useHistoryStore.setState({
+              undoStack: hs.undoStack.slice(0, -1),
+              redoStack: [...hs.redoStack, { type: 'pages', tabId: entry.tabId, pages: currentSnapshot }]
+            })
+            useFormatStore.getState().updateFormatState<PdfFormatState>(entry.tabId, (prev) => ({
+              ...prev, pages: entry.pages
+            }))
+            return
+          }
+        }
+      }
+      if (ctrl && (e.key === 'y' || (shift && e.key === 'Z'))) {
+        const hs = useHistoryStore.getState()
+        if (hs.redoStack.length > 0) {
+          const entry = hs.redoStack[hs.redoStack.length - 1]
+          if (entry.type === 'pages') {
+            e.preventDefault()
+            // Save current state to undo before restoring
+            const cur = useFormatStore.getState().data[entry.tabId] as PdfFormatState | undefined
+            const currentSnapshot = cur ? JSON.parse(JSON.stringify(cur.pages)) : []
+            useHistoryStore.setState({
+              redoStack: hs.redoStack.slice(0, -1),
+              undoStack: [...hs.undoStack, { type: 'pages', tabId: entry.tabId, pages: currentSnapshot }]
+            })
+            useFormatStore.getState().updateFormatState<PdfFormatState>(entry.tabId, (prev) => ({
+              ...prev, pages: entry.pages
+            }))
+            return
+          }
+        }
+      }
 
       // Tab cycling
       if (ctrl && e.key === 'Tab') {

@@ -23,11 +23,21 @@
   font: {
     list: async () => [],
     getBytes: async () => new Uint8Array(),
+    subset: async () => new Uint8Array(),
     import: async () => null,
     remove: async () => {},
   },
   pdf: {
     merge: async (arr: unknown[]) => arr[0],
+  },
+  folder: {
+    pick: async () => null,
+  },
+  print: {
+    pdf: async () => true,
+  },
+  capture: {
+    screen: async () => null,
   },
   on: () => () => {},
 }
@@ -38,9 +48,11 @@ import { PDFDocument } from 'pdf-lib'
 import '../src/renderer/styles/global.css'
 import PdfToolbar from '../src/renderer/formats/pdf/PdfToolbar'
 import PdfViewer from '../src/renderer/formats/pdf/PdfViewer'
+import PdfSidebar from '../src/renderer/formats/pdf/PdfSidebar'
 import { useTabStore } from '../src/renderer/stores/tabStore'
 import { useFormatStore } from '../src/renderer/stores/formatStore'
 import { useUIStore } from '../src/renderer/stores/uiStore'
+import { useHistoryStore } from '../src/renderer/stores/historyStore'
 import type { PdfFormatState } from '../src/renderer/formats/pdf'
 import * as pdfOps from '../src/renderer/services/pdfOps'
 import * as pdfToWord from '../src/renderer/services/pdfToWord'
@@ -57,6 +69,15 @@ import * as formDesigner from '../src/renderer/components/editor/FormDesignerToo
 import * as pdfLib from 'pdf-lib'
 import * as pdfjs from 'pdfjs-dist'
 import { applyMeasureTool } from '../src/renderer/components/editor/MeasureTool'
+import * as contentStreamParser from '../src/renderer/services/contentStreamParser'
+import * as pdfTextExtract from '../src/renderer/services/pdfTextExtract'
+import * as cmapResolver from '../src/renderer/services/cmapResolver'
+import * as pdfImageOps from '../src/renderer/services/pdfImageOps'
+import * as pdfFlatten from '../src/renderer/services/pdfFlatten'
+import * as actionWizard from '../src/renderer/services/actionWizard'
+import * as pdfAccessibility from '../src/renderer/services/pdfAccessibility'
+import * as pdfAValidation from '../src/renderer/services/pdfAValidation'
+import { pixelDiffPages } from '../src/renderer/services/pdfCompare'
 import LayersPanel from '../src/renderer/components/editor/LayersPanel'
 
 // Expose all services + libs to the harness driver.
@@ -76,6 +97,15 @@ Object.assign(window as unknown as Record<string, unknown>, {
   __pdfLib: pdfLib,
   __pdfjs: pdfjs,
   __applyMeasureTool: applyMeasureTool,
+  __contentStreamParser: contentStreamParser,
+  __pdfTextExtract: pdfTextExtract,
+  __cmapResolver: cmapResolver,
+  __pdfImageOps: pdfImageOps,
+  __pdfFlatten: pdfFlatten,
+  __actionWizard: actionWizard,
+  __pdfAccessibility: pdfAccessibility,
+  __pdfAValidation: pdfAValidation,
+  __pixelDiffPages: pixelDiffPages,
 })
 
 // Capture full console.error argument lists (React substitutes through %s
@@ -100,6 +130,7 @@ console.error = (...args: unknown[]) => {
   ui: useUIStore,
   tab: useTabStore,
   format: useFormatStore,
+  history: useHistoryStore,
 }
 
 // Walk the React fiber tree from each `canvas.lower-canvas` DOM node up to
@@ -141,8 +172,11 @@ const TAB_ID = 'harness-tab'
 
 async function generateBlankPdf(): Promise<Uint8Array> {
   const doc = await PDFDocument.create()
-  const page = doc.addPage([612, 792]) // US letter
-  page.drawText('Harness Test Page', { x: 50, y: 740, size: 18 })
+  for (let i = 1; i <= 4; i++) {
+    const page = doc.addPage([612, 792]) // US letter
+    page.drawText(`Harness Test Page ${i}`, { x: 50, y: 740, size: 18 })
+    page.drawText(`This is page ${i} of 4`, { x: 50, y: 700, size: 12 })
+  }
   return await doc.save()
 }
 
@@ -176,8 +210,8 @@ function HarnessApp() {
       })
       const seed: PdfFormatState = {
         pdfBytes: bytes,
-        pageCount: 1,
-        pages: [{ pageIndex: 0, rotation: 0, deleted: false, fabricJSON: null, formValues: null }],
+        pageCount: 4,
+        pages: Array.from({ length: 4 }, (_, i) => ({ pageIndex: i, rotation: 0 as const, deleted: false, fabricJSON: null, formValues: null })),
       }
       useFormatStore.getState().setFormatState(TAB_ID, seed)
       setPdfReady(true)
@@ -185,7 +219,7 @@ function HarnessApp() {
   }, [])
 
   return (
-    <div style={{ background: 'var(--bg-secondary)', minHeight: '100vh', color: 'var(--text-primary)', fontFamily: 'sans-serif', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ background: 'var(--bg-secondary)', height: '100vh', color: 'var(--text-primary)', fontFamily: 'sans-serif', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <div style={{ padding: 6, fontSize: 12, borderBottom: '1px solid var(--border)', display: 'flex', gap: 12 }}>
         <strong>Harness (full)</strong>
         <span>tool=<b>{tool}</b></span>
@@ -201,12 +235,12 @@ function HarnessApp() {
         {pdfReady && <PdfToolbar tabId={TAB_ID} />}
       </div>
 
-      <div style={{ flex: 1, display: 'flex', minHeight: 800 }}>
+      <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
+        <div data-testid="sidebar-wrapper" style={{ width: 160, flexShrink: 0, overflow: 'auto', background: 'var(--bg-primary)', borderRight: '1px solid var(--border)' }}>
+          {pdfReady && <PdfSidebar tabId={TAB_ID} />}
+        </div>
         <div data-testid="viewer-wrapper" style={{ flex: 1, background: 'var(--bg-secondary)' }}>
           {pdfReady && <PdfViewer tabId={TAB_ID} />}
-        </div>
-        <div data-testid="layers-dock" style={{ width: 220, padding: 6, background: 'var(--bg-primary)', borderLeft: '1px solid var(--border)', overflow: 'auto' }}>
-          <LayersPanel fabricCanvas={fabricCanvas as Parameters<typeof LayersPanel>[0]['fabricCanvas']} />
         </div>
       </div>
     </div>

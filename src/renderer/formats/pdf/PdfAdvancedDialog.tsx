@@ -12,7 +12,14 @@ import {
   rotatePages,
   extractText,
   setPdfThumbnail, setPdfThumbnailFromPage,
+  setPageLabels, sanitizePdf,
+  type PageLabelRange, type PageLabelStyle,
 } from '../../services/pdfOps'
+import { executeWorkflow, PRESET_WORKFLOWS, type ActionStep, type ActionStepType } from '../../services/actionWizard'
+import { validatePdfA } from '../../services/pdfAValidation'
+import { readStructureTree, isTaggedPdf, listStructureTags, type StructTag } from '../../services/pdfAccessibility'
+import { listEmbeddedImages, replaceEmbeddedImage, resizeEmbeddedImage } from '../../services/pdfImageOps'
+import { PDFDocument, PDFName, PDFNumber, PDFDict } from 'pdf-lib'
 import { pdfToWord } from '../../services/pdfToWord'
 import {
   pdfToText, pdfToExcel, pdfToPpt,
@@ -31,33 +38,33 @@ interface Props {
   onClose: () => void
 }
 
-type Section = 'metadata' | 'organize' | 'convert' | 'bookmarks' | 'text' | 'compare' | 'optimize' | 'sign' | 'pages' | 'highlights' | 'thumbnail'
+type Section = 'metadata' | 'organize' | 'convert' | 'bookmarks' | 'text' | 'compare' | 'optimize' | 'sign' | 'pages' | 'highlights' | 'thumbnail' | 'pagelabels' | 'sanitize' | 'wizard' | 'pdfa' | 'accessibility' | 'images' | 'crop' | 'links' | 'redact_verify'
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: 'metadata', label: 'Metadata' },
   { id: 'thumbnail', label: 'Thumbnail' },
   { id: 'organize', label: 'Organize' },
   { id: 'pages', label: 'Pages' },
+  { id: 'pagelabels', label: 'Page Labels' },
+  { id: 'crop', label: 'Crop Pages' },
   { id: 'convert', label: 'Convert' },
+  { id: 'images', label: 'Images' },
   { id: 'bookmarks', label: 'Bookmarks' },
+  { id: 'links', label: 'Links' },
   { id: 'text', label: 'Text' },
   { id: 'highlights', label: 'Highlights' },
   { id: 'compare', label: 'Compare' },
   { id: 'sign', label: 'Sign' },
+  { id: 'redact_verify', label: 'Redact Verify' },
   { id: 'optimize', label: 'Optimize' },
+  { id: 'sanitize', label: 'Sanitize' },
+  { id: 'wizard', label: 'Action Wizard' },
+  { id: 'pdfa', label: 'PDF/A' },
+  { id: 'accessibility', label: 'Accessibility' },
 ]
 
-function downloadBytes(name: string, bytes: Uint8Array, mime = 'application/pdf') {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const blob = new Blob([bytes as any], { type: mime })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = name
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
+async function downloadBytes(_name: string, bytes: Uint8Array, _mime = 'application/pdf') {
+  await window.api.file.saveAs(bytes)
 }
 
 export default function PdfAdvancedDialog({ tabId, onClose }: Props) {
@@ -110,6 +117,15 @@ export default function PdfAdvancedDialog({ tabId, onClose }: Props) {
             {section === 'compare' && <CompareSection state={state} onStatus={setStatus} />}
             {section === 'sign' && <SignSection state={state} tabId={tabId} onStatus={setStatus} />}
             {section === 'optimize' && <OptimizeSection state={state} tabId={tabId} onStatus={setStatus} />}
+            {section === 'pagelabels' && <PageLabelsSection state={state} tabId={tabId} onStatus={setStatus} />}
+            {section === 'sanitize' && <SanitizeSection state={state} tabId={tabId} onStatus={setStatus} />}
+            {section === 'wizard' && <WizardSection state={state} tabId={tabId} onStatus={setStatus} />}
+            {section === 'pdfa' && <PdfASection state={state} tabId={tabId} onStatus={setStatus} />}
+            {section === 'accessibility' && <AccessibilitySection state={state} onStatus={setStatus} />}
+            {section === 'images' && <ImagesSection state={state} tabId={tabId} onStatus={setStatus} />}
+            {section === 'crop' && <CropSection state={state} tabId={tabId} onStatus={setStatus} />}
+            {section === 'links' && <LinksSection state={state} tabId={tabId} onStatus={setStatus} />}
+            {section === 'redact_verify' && <RedactVerifySection state={state} onStatus={setStatus} />}
           </div>
         </div>
         {status && (
@@ -180,7 +196,7 @@ function OrganizeSection({ state, tabId, onStatus }: { state: PdfFormatState; ta
 
   const doSplit = async () => {
     const chunks = await splitEveryN(state.pdfBytes, n)
-    chunks.forEach((bytes, i) => downloadBytes(`split-${i + 1}.pdf`, bytes))
+    for (let i = 0; i < chunks.length; i++) await downloadBytes(`split-${i + 1}.pdf`, chunks[i])
     onStatus(`Split into ${chunks.length} files (downloaded).`)
   }
   const doBates = async () => {
@@ -197,7 +213,7 @@ function OrganizeSection({ state, tabId, onStatus }: { state: PdfFormatState; ta
   }
   const doFlatten = async () => {
     const flat = await flattenForm(state.pdfBytes)
-    downloadBytes('flattened.pdf', flat)
+    await downloadBytes('flattened.pdf', flat)
     onStatus('Form fields flattened (downloaded).')
   }
 
@@ -231,38 +247,38 @@ function ConvertSection({ state, onStatus }: { state: PdfFormatState; onStatus: 
   const [scale, setScale] = useState(2)
   const toWord = async () => {
     const bytes = await pdfToWord(state.pdfBytes)
-    downloadBytes('converted.docx', bytes, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    await downloadBytes('converted.docx', bytes, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
     onStatus(`PDF→Word exported (${bytes.byteLength} bytes).`)
   }
   const toExcel = async () => {
     const bytes = await pdfToExcel(state.pdfBytes)
-    downloadBytes('converted.xlsx', bytes, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    await downloadBytes('converted.xlsx', bytes, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     onStatus(`PDF→Excel exported (${bytes.byteLength} bytes).`)
   }
   const toPpt = async () => {
     const bytes = await pdfToPpt(state.pdfBytes)
-    downloadBytes('converted.pptx', bytes, 'application/vnd.openxmlformats-officedocument.presentationml.presentation')
+    await downloadBytes('converted.pptx', bytes, 'application/vnd.openxmlformats-officedocument.presentationml.presentation')
     onStatus(`PDF→PPT exported (${bytes.byteLength} bytes).`)
   }
   const toTxt = async () => {
     const text = await pdfToText(state.pdfBytes)
     const blob = new Uint8Array(new TextEncoder().encode(text))
-    downloadBytes('converted.txt', blob, 'text/plain')
+    await downloadBytes('converted.txt', blob, 'text/plain')
     onStatus(`PDF→TXT exported (${blob.byteLength} bytes).`)
   }
   const toImages = async () => {
     const imgs = await pdfToImages(state.pdfBytes, { scale })
-    imgs.forEach((b, i) => downloadBytes(`page-${i + 1}.png`, b, 'image/png'))
+    for (let i = 0; i < imgs.length; i++) await downloadBytes(`page-${i + 1}.png`, imgs[i], 'image/png')
     onStatus(`Exported ${imgs.length} PNGs.`)
   }
   const toImageOnly = async () => {
     const bytes = await toImageOnlyPdf(state.pdfBytes)
-    downloadBytes('image-only.pdf', bytes)
+    await downloadBytes('image-only.pdf', bytes)
     onStatus(`Image-only PDF exported (text now unselectable).`)
   }
   const extractPics = async () => {
     const pics = await extractAllPictures(state.pdfBytes, { scale: 2 })
-    pics.forEach((b, i) => downloadBytes(`picture-${i + 1}.png`, b, 'image/png'))
+    for (let i = 0; i < pics.length; i++) await downloadBytes(`picture-${i + 1}.png`, pics[i], 'image/png')
     onStatus(`Extracted ${pics.length} picture(s).`)
   }
   const imagesToPdfFromPicker = async () => {
@@ -273,7 +289,7 @@ function ConvertSection({ state, onStatus }: { state: PdfFormatState; onStatus: 
       if (!files.length) return
       const arrays: Uint8Array[] = await Promise.all(files.map(async (f) => new Uint8Array(await f.arrayBuffer())))
       const out = await imagesToPdf(arrays)
-      downloadBytes('from-images.pdf', out)
+      await downloadBytes('from-images.pdf', out)
       onStatus(`Created PDF from ${arrays.length} image(s).`)
     }
     input.click()
@@ -376,10 +392,10 @@ function HighlightsSection({ state, onStatus }: { state: PdfFormatState; onStatu
     setItems(hls)
     onStatus(`${hls.length} highlight(s) exported.`)
   }
-  const download = () => {
+  const download = async () => {
     const content = items.map((h) => `Page ${h.page + 1}: ${h.text}`).join('\n')
     const blob = new Uint8Array(new TextEncoder().encode(content))
-    downloadBytes('highlights.txt', blob, 'text/plain')
+    await downloadBytes('highlights.txt', blob, 'text/plain')
     onStatus('Highlights saved to highlights.txt.')
   }
   return (
@@ -426,12 +442,13 @@ function SignSection({ state, tabId, onStatus }: { state: PdfFormatState; tabId:
     setSigs(await listSignatures(bytes))
     onStatus(`Document signed by "${cn}".`)
   }
-  const downloadP12 = () => {
+  const downloadP12 = async () => {
     if (!cert) return
-    downloadBytes(`${cn.replace(/\W+/g, '_')}.p12`, cert.p12, 'application/x-pkcs12')
+    const slug = cn.replace(/\W+/g, '_')
+    await downloadBytes(`${slug}.p12`, cert.p12, 'application/x-pkcs12')
     const pemBytes = new Uint8Array(new TextEncoder().encode(cert.certPem))
-    downloadBytes(`${cn.replace(/\W+/g, '_')}-passphrase.txt`, new Uint8Array(new TextEncoder().encode(cert.passphrase)), 'text/plain')
-    downloadBytes(`${cn.replace(/\W+/g, '_')}-public.pem`, pemBytes, 'application/x-pem-file')
+    await downloadBytes(`${slug}-passphrase.txt`, new Uint8Array(new TextEncoder().encode(cert.passphrase)), 'text/plain')
+    await downloadBytes(`${slug}-public.pem`, pemBytes, 'application/x-pem-file')
     onStatus('Cert bundle + passphrase + public .pem downloaded.')
   }
 
@@ -688,6 +705,662 @@ function OptimizeSection({ state, tabId, onStatus }: { state: PdfFormatState; ta
       <h4 style={{ marginTop: 0, fontSize: 13 }}>Compress / Optimize</h4>
       <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>Current size: <strong>{before.toLocaleString()} bytes</strong></div>
       <button data-testid="optimize-go" style={btn} onClick={run}>Optimize now</button>
+    </div>
+  )
+}
+
+function PageLabelsSection({ state, tabId, onStatus }: { state: PdfFormatState; tabId: string; onStatus: (s: string) => void }) {
+  const [ranges, setRanges] = useState<{ from: number; style: PageLabelStyle; prefix: string; start: number }[]>([
+    { from: 0, style: 'D', prefix: '', start: 1 }
+  ])
+  const styles: { value: PageLabelStyle; label: string }[] = [
+    { value: 'D', label: '1, 2, 3 (Decimal)' },
+    { value: 'R', label: 'I, II, III (Roman UC)' },
+    { value: 'r', label: 'i, ii, iii (Roman LC)' },
+    { value: 'A', label: 'A, B, C (Letter UC)' },
+    { value: 'a', label: 'a, b, c (Letter LC)' },
+  ]
+  const addRange = () => setRanges([...ranges, { from: ranges.length > 0 ? ranges[ranges.length - 1].from + 1 : 0, style: 'D', prefix: '', start: 1 }])
+  const removeRange = (i: number) => setRanges(ranges.filter((_, idx) => idx !== i))
+  const updateRange = (i: number, field: string, value: unknown) => {
+    setRanges(ranges.map((r, idx) => idx === i ? { ...r, [field]: value } : r))
+  }
+  const apply = async () => {
+    const labelRanges: PageLabelRange[] = ranges.map(r => ({
+      from: r.from,
+      style: r.style,
+      prefix: r.prefix || undefined,
+      start: r.start,
+    }))
+    const out = await setPageLabels(state.pdfBytes, labelRanges)
+    useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({ ...prev, pdfBytes: out }))
+    useTabStore.getState().setTabDirty(tabId, true)
+    onStatus(`Applied ${ranges.length} page label range(s).`)
+  }
+  return (
+    <div data-testid="section-pagelabels">
+      <h4 style={{ marginTop: 0, fontSize: 13 }}>Page Labels</h4>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>Set custom numbering styles (i, ii, iii → 1, 2, 3 → A, B, C) for different page ranges.</div>
+      {ranges.map((r, i) => (
+        <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
+          <label style={{ fontSize: 11, width: 50 }}>Page {r.from + 1}+</label>
+          <input type="number" min={1} value={r.from + 1} style={{ width: 50, fontSize: 11, padding: '2px 4px' }}
+            onChange={(e) => updateRange(i, 'from', Math.max(0, Number(e.target.value) - 1))} />
+          <select value={r.style} style={{ fontSize: 11, padding: '2px 4px' }}
+            onChange={(e) => updateRange(i, 'style', e.target.value)}>
+            {styles.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
+          </select>
+          <input placeholder="Prefix" value={r.prefix} style={{ width: 70, fontSize: 11, padding: '2px 4px' }}
+            onChange={(e) => updateRange(i, 'prefix', e.target.value)} />
+          <label style={{ fontSize: 11 }}>Start:</label>
+          <input type="number" min={1} value={r.start} style={{ width: 40, fontSize: 11, padding: '2px 4px' }}
+            onChange={(e) => updateRange(i, 'start', Math.max(1, Number(e.target.value)))} />
+          {ranges.length > 1 && <button style={{ fontSize: 10, padding: '1px 4px', color: 'var(--danger)' }} onClick={() => removeRange(i)}>x</button>}
+        </div>
+      ))}
+      <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+        <button style={btn} onClick={addRange}>+ Add Range</button>
+        <button style={btn} onClick={apply}>Apply Labels</button>
+      </div>
+    </div>
+  )
+}
+
+function SanitizeSection({ state, tabId, onStatus }: { state: PdfFormatState; tabId: string; onStatus: (s: string) => void }) {
+  const [opts, setOpts] = useState({
+    stripMetadata: true,
+    stripXmp: true,
+    stripJavaScript: true,
+    stripAttachments: true,
+    stripHiddenLayers: true,
+    stripAnnotations: false,
+    stripForms: false,
+  })
+  const toggle = (key: string) => setOpts({ ...opts, [key]: !(opts as any)[key] })
+  const run = async () => {
+    const out = await sanitizePdf(state.pdfBytes, opts)
+    const saved = state.pdfBytes.byteLength - out.byteLength
+    useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({ ...prev, pdfBytes: out }))
+    useTabStore.getState().setTabDirty(tabId, true)
+    onStatus(`Sanitized. Removed ${saved > 0 ? saved.toLocaleString() + ' bytes of' : ''} hidden data.`)
+  }
+  const items: { key: string; label: string; desc: string }[] = [
+    { key: 'stripMetadata', label: 'Document metadata', desc: 'Title, author, creator, producer, dates' },
+    { key: 'stripXmp', label: 'XMP metadata stream', desc: 'Extended metadata (creation software, edit history)' },
+    { key: 'stripJavaScript', label: 'JavaScript & actions', desc: 'OpenAction, page actions, embedded scripts' },
+    { key: 'stripAttachments', label: 'Embedded file attachments', desc: 'Files embedded inside the PDF' },
+    { key: 'stripHiddenLayers', label: 'Hidden layers (OCG)', desc: 'Optional content groups / hidden layers' },
+    { key: 'stripAnnotations', label: 'All annotations', desc: 'Comments, markup, links (destructive)' },
+    { key: 'stripForms', label: 'Interactive forms', desc: 'AcroForm + XFA form data (destructive)' },
+  ]
+  return (
+    <div data-testid="section-sanitize">
+      <h4 style={{ marginTop: 0, fontSize: 13 }}>Deep Sanitize</h4>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>Remove hidden information from the PDF for privacy and compliance. Some options are destructive.</div>
+      {items.map(it => (
+        <label key={it.key} style={{ display: 'flex', gap: 6, alignItems: 'flex-start', marginBottom: 6, cursor: 'pointer', fontSize: 12 }}>
+          <input type="checkbox" checked={(opts as any)[it.key]} onChange={() => toggle(it.key)} style={{ marginTop: 2 }} />
+          <div>
+            <div style={{ fontWeight: 500 }}>{it.label}</div>
+            <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{it.desc}</div>
+          </div>
+        </label>
+      ))}
+      <button style={btn} onClick={run}>Sanitize Now</button>
+    </div>
+  )
+}
+
+// ── Action Wizard ────────────────────────────────────────────────
+
+function WizardSection({ state, tabId, onStatus }: { state: PdfFormatState; tabId: string; onStatus: (s: string) => void }) {
+  const allSteps: { type: ActionStepType; label: string }[] = [
+    { type: 'compress', label: 'Compress / Optimize' },
+    { type: 'sanitize', label: 'Deep Sanitize' },
+    { type: 'flatten_transparency', label: 'Flatten Transparency' },
+    { type: 'bates', label: 'Bates Numbering' },
+    { type: 'to_word', label: 'Convert to Word' },
+    { type: 'to_excel', label: 'Convert to Excel' },
+    { type: 'to_ppt', label: 'Convert to PowerPoint' },
+    { type: 'to_text', label: 'Convert to Text' },
+    { type: 'to_image_only', label: 'Convert to Image-Only PDF' },
+  ]
+  const [steps, setSteps] = useState<ActionStep[]>([])
+  const [running, setRunning] = useState(false)
+  const [progress, setProgress] = useState('')
+  const [logs, setLogs] = useState<string[]>([])
+
+  const addStep = (type: ActionStepType, label: string) => setSteps([...steps, { type, label }])
+  const removeStep = (i: number) => setSteps(steps.filter((_, idx) => idx !== i))
+  const moveStep = (i: number, dir: -1 | 1) => {
+    const j = i + dir
+    if (j < 0 || j >= steps.length) return
+    const copy = [...steps]; [copy[i], copy[j]] = [copy[j], copy[i]]
+    setSteps(copy)
+  }
+
+  const runWorkflow = async () => {
+    if (steps.length === 0) { onStatus('Add steps first.'); return }
+    setRunning(true); setLogs([])
+    const result = await executeWorkflow(state.pdfBytes, { name: 'Custom', steps }, (step, total, label) => {
+      setProgress(`Step ${step + 1}/${total}: ${label}`)
+    })
+    setLogs(result.log)
+    if (result.success) {
+      if (result.outputFormat === 'pdf') {
+        useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({ ...prev, pdfBytes: result.outputBytes }))
+        useTabStore.getState().setTabDirty(tabId, true)
+        onStatus('Workflow complete — PDF updated.')
+      } else {
+        await downloadBytes('output.' + result.outputFormat, result.outputBytes)
+        onStatus('Workflow complete — file downloaded.')
+      }
+    } else {
+      onStatus('Workflow failed — check log.')
+    }
+    setRunning(false); setProgress('')
+  }
+
+  const runPreset = async (idx: number) => {
+    setRunning(true)
+    const result = await executeWorkflow(state.pdfBytes, PRESET_WORKFLOWS[idx])
+    if (result.success) {
+      useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({ ...prev, pdfBytes: result.outputBytes }))
+      useTabStore.getState().setTabDirty(tabId, true)
+      onStatus(`"${PRESET_WORKFLOWS[idx].name}" complete.`)
+    }
+    setRunning(false)
+  }
+
+  return (
+    <div data-testid="section-wizard">
+      <h4 style={{ marginTop: 0, fontSize: 13 }}>Action Wizard</h4>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>Chain multiple operations into a workflow. Steps run sequentially.</div>
+
+      <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4 }}>Presets</div>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 12, flexWrap: 'wrap' }}>
+        {PRESET_WORKFLOWS.map((wf, i) => (
+          <button key={i} style={btn} disabled={running} onClick={() => runPreset(i)}>{wf.name}</button>
+        ))}
+      </div>
+
+      <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4 }}>Custom Workflow</div>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 8, flexWrap: 'wrap' }}>
+        {allSteps.map(s => (
+          <button key={s.type} style={{ ...btn, fontSize: 10 }} onClick={() => addStep(s.type, s.label)}>+ {s.label}</button>
+        ))}
+      </div>
+
+      {steps.length > 0 && (
+        <div style={{ border: '1px solid var(--border)', borderRadius: 4, padding: 6, marginBottom: 8 }}>
+          {steps.map((s, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 0', fontSize: 11 }}>
+              <span style={{ width: 18, textAlign: 'center', color: 'var(--text-muted)' }}>{i + 1}</span>
+              <span style={{ flex: 1 }}>{s.label}</span>
+              <button style={{ fontSize: 9, padding: '1px 3px' }} onClick={() => moveStep(i, -1)}>^</button>
+              <button style={{ fontSize: 9, padding: '1px 3px' }} onClick={() => moveStep(i, 1)}>v</button>
+              <button style={{ fontSize: 9, padding: '1px 3px', color: 'var(--danger)' }} onClick={() => removeStep(i)}>x</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <button style={btn} disabled={running || steps.length === 0} onClick={runWorkflow}>
+        {running ? progress || 'Running...' : 'Run Workflow'}
+      </button>
+
+      {logs.length > 0 && (
+        <pre style={{ marginTop: 8, fontSize: 10, color: 'var(--text-muted)', maxHeight: 120, overflow: 'auto', background: 'var(--bg-surface)', padding: 6, borderRadius: 3 }}>
+          {logs.join('\n')}
+        </pre>
+      )}
+    </div>
+  )
+}
+
+// ── PDF/A Validation + Remediation ───────────────────────────────
+
+function PdfASection({ state, tabId, onStatus }: { state: PdfFormatState; tabId: string; onStatus: (s: string) => void }) {
+  const [result, setResult] = useState<{ isCompliant: boolean; score: number; issues: { severity: string; code: string; message: string; remediation?: string }[] } | null>(null)
+
+  const validate = async () => {
+    const r = await validatePdfA(state.pdfBytes)
+    setResult(r)
+    onStatus(`PDF/A score: ${r.score}/100 (${r.isCompliant ? 'Compliant' : 'Non-compliant'})`)
+  }
+
+  const remediate = async () => {
+    if (!result) return
+    let bytes = state.pdfBytes
+    // Auto-fix what we can
+    for (const issue of result.issues) {
+      if (issue.code === 'PDFA-1') {
+        // Add a title
+        const doc = await PDFDocument.load(bytes)
+        doc.setTitle('Untitled Document')
+        bytes = new Uint8Array(await doc.save())
+      }
+      if (issue.code === 'PDFA-2') {
+        // Strip JavaScript
+        bytes = await sanitizePdf(bytes, { stripJavaScript: true })
+      }
+      if (issue.code === 'PDFA-4') {
+        // Strip attachments
+        bytes = await sanitizePdf(bytes, { stripAttachments: true })
+      }
+      if (issue.code === 'PDFA-5') {
+        // Strip hidden layers
+        bytes = await sanitizePdf(bytes, { stripHiddenLayers: true })
+      }
+    }
+    useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({ ...prev, pdfBytes: bytes }))
+    useTabStore.getState().setTabDirty(tabId, true)
+    onStatus('Auto-remediation applied. Re-validate to check.')
+    setResult(null)
+  }
+
+  return (
+    <div data-testid="section-pdfa">
+      <h4 style={{ marginTop: 0, fontSize: 13 }}>PDF/A Validation</h4>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>Check conformance against PDF/A-1b archival profile.</div>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+        <button style={btn} onClick={validate}>Validate</button>
+        {result && result.issues.length > 0 && <button style={btn} onClick={remediate}>Auto-Fix Issues</button>}
+      </div>
+      {result && (
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, color: result.isCompliant ? 'var(--success)' : 'var(--danger)' }}>
+            Score: {result.score}/100 — {result.isCompliant ? 'Compliant' : 'Non-compliant'}
+          </div>
+          {result.issues.map((issue, i) => (
+            <div key={i} style={{ padding: '4px 0', borderBottom: '1px solid var(--border)', fontSize: 11 }}>
+              <span style={{ color: issue.severity === 'error' ? 'var(--danger)' : '#fab387', fontWeight: 500 }}>[{issue.code}]</span>{' '}
+              {issue.message}
+              {issue.remediation && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>Fix: {issue.remediation}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Accessibility ────────────────────────────────────────────────
+
+function AccessibilitySection({ state, onStatus }: { state: PdfFormatState; onStatus: (s: string) => void }) {
+  const [tagged, setTagged] = useState<boolean | null>(null)
+  const [tags, setTags] = useState<{ type: string; hasAlt: boolean; depth: number }[]>([])
+  const [tree, setTree] = useState<StructTag | null>(null)
+
+  const check = async () => {
+    const t = await isTaggedPdf(state.pdfBytes)
+    setTagged(t)
+    if (t) {
+      const tagList = await listStructureTags(state.pdfBytes)
+      setTags(tagList)
+      const tr = await readStructureTree(state.pdfBytes)
+      setTree(tr)
+      onStatus(`Tagged PDF: ${tagList.length} structure elements found.`)
+    } else {
+      onStatus('This PDF is NOT tagged (no accessibility structure tree).')
+    }
+  }
+
+  const renderTag = (tag: StructTag, depth: number): JSX.Element => (
+    <div key={depth + tag.type + (tag.title || '')} style={{ paddingLeft: depth * 16, fontSize: 11, padding: '2px 0 2px ' + (depth * 16) + 'px' }}>
+      <span style={{ color: 'var(--accent)', fontWeight: 500 }}>&lt;{tag.type}&gt;</span>
+      {tag.title && <span style={{ color: 'var(--text-secondary)' }}> "{tag.title}"</span>}
+      {tag.altText && <span style={{ color: 'var(--success)', fontSize: 10 }}> [alt: {tag.altText}]</span>}
+      {tag.children.map((c, i) => renderTag(c, depth + 1))}
+    </div>
+  )
+
+  return (
+    <div data-testid="section-accessibility">
+      <h4 style={{ marginTop: 0, fontSize: 13 }}>Accessibility</h4>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>Inspect the PDF's structure tree for accessibility compliance.</div>
+      <button style={btn} onClick={check}>Analyze Accessibility</button>
+
+      {tagged !== null && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 500, color: tagged ? 'var(--success)' : 'var(--danger)' }}>
+            {tagged ? 'Tagged PDF' : 'NOT Tagged'} — {tags.length} structure elements
+          </div>
+          {tagged && tags.length > 0 && (
+            <div style={{ marginTop: 6, fontSize: 11 }}>
+              <div style={{ color: 'var(--text-muted)', marginBottom: 4 }}>Tag types: {[...new Set(tags.map(t => t.type))].join(', ')}</div>
+              <div style={{ color: 'var(--text-muted)', marginBottom: 4 }}>With alt-text: {tags.filter(t => t.hasAlt).length} / {tags.length}</div>
+            </div>
+          )}
+          {tree && (
+            <div style={{ marginTop: 8, maxHeight: 200, overflow: 'auto', border: '1px solid var(--border)', borderRadius: 3, padding: 6, background: 'var(--bg-surface)' }}>
+              {renderTag(tree, 0)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Embedded Images ──────────────────────────────────────────────
+
+function ImagesSection({ state, tabId, onStatus }: { state: PdfFormatState; tabId: string; onStatus: (s: string) => void }) {
+  const [images, setImages] = useState<{ pageIndex: number; xObjectName: string; width: number; height: number; filter: string; byteLength: number }[]>([])
+  const [selected, setSelected] = useState<number | null>(null)
+  const [newWidth, setNewWidth] = useState(0)
+  const [newHeight, setNewHeight] = useState(0)
+
+  const scan = async () => {
+    const imgs = await listEmbeddedImages(state.pdfBytes)
+    setImages(imgs)
+    onStatus(`Found ${imgs.length} embedded image(s).`)
+  }
+
+  const resize = async () => {
+    if (selected === null || newWidth < 1 || newHeight < 1) return
+    const img = images[selected]
+    try {
+      const out = await resizeEmbeddedImage(state.pdfBytes, img.pageIndex, img.xObjectName, newWidth, newHeight)
+      useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({ ...prev, pdfBytes: out }))
+      useTabStore.getState().setTabDirty(tabId, true)
+      onStatus(`Resized ${img.xObjectName} to ${newWidth}x${newHeight}.`)
+      scan()
+    } catch (e) { onStatus('Resize failed: ' + (e as Error).message) }
+  }
+
+  const replace = async () => {
+    if (selected === null) return
+    const img = images[selected]
+    const input = document.createElement('input')
+    input.type = 'file'; input.accept = 'image/jpeg,image/png'
+    input.onchange = async () => {
+      const file = input.files?.[0]
+      if (!file) return
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      // Get dimensions from the image
+      const bitmap = await createImageBitmap(new Blob([bytes]))
+      try {
+        const out = await replaceEmbeddedImage(state.pdfBytes, img.pageIndex, img.xObjectName, bytes, bitmap.width, bitmap.height)
+        bitmap.close()
+        useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({ ...prev, pdfBytes: out }))
+        useTabStore.getState().setTabDirty(tabId, true)
+        onStatus(`Replaced ${img.xObjectName} with ${file.name}.`)
+        scan()
+      } catch (e) { onStatus('Replace failed: ' + (e as Error).message) }
+    }
+    input.click()
+  }
+
+  return (
+    <div data-testid="section-images">
+      <h4 style={{ marginTop: 0, fontSize: 13 }}>Embedded Images</h4>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>List, resize, or replace images embedded in the PDF.</div>
+      <button style={btn} onClick={scan}>Scan Images</button>
+
+      {images.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse' }}>
+            <thead><tr style={{ borderBottom: '1px solid var(--border)' }}>
+              <th style={{ textAlign: 'left', padding: 3 }}>Name</th>
+              <th style={{ textAlign: 'left', padding: 3 }}>Page</th>
+              <th style={{ textAlign: 'left', padding: 3 }}>Size</th>
+              <th style={{ textAlign: 'left', padding: 3 }}>Format</th>
+              <th style={{ textAlign: 'right', padding: 3 }}>Bytes</th>
+            </tr></thead>
+            <tbody>{images.map((img, i) => (
+              <tr key={i} onClick={() => { setSelected(i); setNewWidth(img.width); setNewHeight(img.height) }}
+                style={{ cursor: 'pointer', background: selected === i ? 'var(--bg-surface)' : 'transparent', borderBottom: '1px solid var(--border)' }}>
+                <td style={{ padding: 3 }}>{img.xObjectName}</td>
+                <td style={{ padding: 3 }}>{img.pageIndex + 1}</td>
+                <td style={{ padding: 3 }}>{img.width}x{img.height}</td>
+                <td style={{ padding: 3 }}>{img.filter}</td>
+                <td style={{ padding: 3, textAlign: 'right' }}>{img.byteLength.toLocaleString()}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+
+          {selected !== null && (
+            <div style={{ marginTop: 8, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              <label style={{ fontSize: 11 }}>Resize to:</label>
+              <input type="number" value={newWidth} onChange={e => setNewWidth(Number(e.target.value))} style={{ width: 60, fontSize: 11, padding: '2px 4px' }} />
+              <span style={{ fontSize: 11 }}>x</span>
+              <input type="number" value={newHeight} onChange={e => setNewHeight(Number(e.target.value))} style={{ width: 60, fontSize: 11, padding: '2px 4px' }} />
+              <button style={btn} onClick={resize}>Resize</button>
+              <button style={btn} onClick={replace}>Replace...</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Crop Pages ───────────────────────────────────────────────────
+
+function CropSection({ state, tabId, onStatus }: { state: PdfFormatState; tabId: string; onStatus: (s: string) => void }) {
+  const [top, setTop] = useState(0)
+  const [bottom, setBottom] = useState(0)
+  const [left, setLeft] = useState(0)
+  const [right, setRight] = useState(0)
+  const [applyTo, setApplyTo] = useState<'all' | 'current'>('all')
+
+  const crop = async () => {
+    const doc = await PDFDocument.load(state.pdfBytes)
+    const pages = doc.getPages()
+    const currentPage = (await import('../../stores/uiStore')).useUIStore.getState().currentPage
+    const targets = applyTo === 'all' ? pages : [pages[currentPage]].filter(Boolean)
+
+    for (const page of targets) {
+      const { width, height } = page.getSize()
+      const cropBox = page.node.get(PDFName.of('CropBox'))
+      // If CropBox exists, use it; otherwise use MediaBox dimensions
+      page.node.set(PDFName.of('CropBox'), doc.context.obj([
+        left,
+        bottom,
+        width - right,
+        height - top
+      ]))
+    }
+
+    const out = new Uint8Array(await doc.save())
+    useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({ ...prev, pdfBytes: out }))
+    useTabStore.getState().setTabDirty(tabId, true)
+    onStatus(`Cropped ${targets.length} page(s): margins T=${top} B=${bottom} L=${left} R=${right} pt.`)
+  }
+
+  return (
+    <div data-testid="section-crop">
+      <h4 style={{ marginTop: 0, fontSize: 13 }}>Crop / Trim Pages</h4>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>Set crop margins (in points). Content outside the crop box is hidden but not removed.</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, maxWidth: 300, marginBottom: 8 }}>
+        <label style={{ fontSize: 11 }}>Top: <input type="number" min={0} value={top} onChange={e => setTop(Number(e.target.value))} style={{ width: 60, fontSize: 11, padding: '2px 4px' }} /></label>
+        <label style={{ fontSize: 11 }}>Bottom: <input type="number" min={0} value={bottom} onChange={e => setBottom(Number(e.target.value))} style={{ width: 60, fontSize: 11, padding: '2px 4px' }} /></label>
+        <label style={{ fontSize: 11 }}>Left: <input type="number" min={0} value={left} onChange={e => setLeft(Number(e.target.value))} style={{ width: 60, fontSize: 11, padding: '2px 4px' }} /></label>
+        <label style={{ fontSize: 11 }}>Right: <input type="number" min={0} value={right} onChange={e => setRight(Number(e.target.value))} style={{ width: 60, fontSize: 11, padding: '2px 4px' }} /></label>
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+        <label style={{ fontSize: 11 }}><input type="radio" checked={applyTo === 'all'} onChange={() => setApplyTo('all')} /> All pages</label>
+        <label style={{ fontSize: 11 }}><input type="radio" checked={applyTo === 'current'} onChange={() => setApplyTo('current')} /> Current page</label>
+      </div>
+      <button style={btn} onClick={crop}>Apply Crop</button>
+    </div>
+  )
+}
+
+// ── Link Editor ──────────────────────────────────────────────────
+
+function LinksSection({ state, tabId, onStatus }: { state: PdfFormatState; tabId: string; onStatus: (s: string) => void }) {
+  const [links, setLinks] = useState<{ page: number; url: string; rect: string }[]>([])
+
+  const scan = async () => {
+    const doc = await PDFDocument.load(state.pdfBytes)
+    const found: { page: number; url: string; rect: string }[] = []
+    for (let i = 0; i < doc.getPageCount(); i++) {
+      const page = doc.getPage(i)
+      const annots = page.node.get(PDFName.of('Annots'))
+      if (!annots) continue
+      const arr = doc.context.lookup(annots) as any
+      if (!arr || !arr.size) continue
+      for (let j = 0; j < arr.size(); j++) {
+        const annotRef = arr.get(j)
+        const annot = doc.context.lookup(annotRef) as PDFDict | undefined
+        if (!annot) continue
+        const subtype = annot.get(PDFName.of('Subtype'))?.toString()
+        if (subtype !== '/Link') continue
+        const action = annot.get(PDFName.of('A'))
+        if (!action) continue
+        const actionDict = doc.context.lookup(action) as PDFDict | undefined
+        if (!actionDict) continue
+        const uri = actionDict.get(PDFName.of('URI'))
+        if (!uri) continue
+        const rect = annot.get(PDFName.of('Rect'))
+        found.push({
+          page: i + 1,
+          url: uri.toString().replace(/^\(|\)$/g, ''),
+          rect: rect?.toString() ?? ''
+        })
+      }
+    }
+    setLinks(found)
+    onStatus(`Found ${found.length} hyperlink(s).`)
+  }
+
+  const removeAllLinks = async () => {
+    const doc = await PDFDocument.load(state.pdfBytes)
+    for (let i = 0; i < doc.getPageCount(); i++) {
+      const page = doc.getPage(i)
+      const annots = page.node.get(PDFName.of('Annots'))
+      if (!annots) continue
+      const arr = doc.context.lookup(annots) as any
+      if (!arr || !arr.size) continue
+      // Filter out Link annotations
+      const keep: any[] = []
+      for (let j = 0; j < arr.size(); j++) {
+        const annotRef = arr.get(j)
+        const annot = doc.context.lookup(annotRef) as PDFDict | undefined
+        if (!annot) { keep.push(annotRef); continue }
+        const subtype = annot.get(PDFName.of('Subtype'))?.toString()
+        if (subtype !== '/Link') keep.push(annotRef)
+      }
+      if (keep.length === 0) {
+        page.node.delete(PDFName.of('Annots'))
+      } else {
+        page.node.set(PDFName.of('Annots'), doc.context.obj(keep))
+      }
+    }
+    const out = new Uint8Array(await doc.save())
+    useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({ ...prev, pdfBytes: out }))
+    useTabStore.getState().setTabDirty(tabId, true)
+    onStatus('All hyperlinks removed.')
+    setLinks([])
+  }
+
+  return (
+    <div data-testid="section-links">
+      <h4 style={{ marginTop: 0, fontSize: 13 }}>Hyperlinks</h4>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>Scan and manage hyperlinks in the PDF.</div>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+        <button style={btn} onClick={scan}>Scan Links</button>
+        {links.length > 0 && <button style={{ ...btn, color: 'var(--danger)' }} onClick={removeAllLinks}>Remove All Links</button>}
+      </div>
+      {links.length > 0 && (
+        <div style={{ maxHeight: 200, overflow: 'auto' }}>
+          {links.map((l, i) => (
+            <div key={i} style={{ padding: '3px 0', borderBottom: '1px solid var(--border)', fontSize: 11 }}>
+              <span style={{ color: 'var(--text-muted)' }}>p{l.page}</span>{' '}
+              <span style={{ color: 'var(--accent)', wordBreak: 'break-all' }}>{l.url}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Redaction Verification ───────────────────────────────────────
+
+function RedactVerifySection({ state, onStatus }: { state: PdfFormatState; onStatus: (s: string) => void }) {
+  const [result, setResult] = useState<{ safe: boolean; issues: string[] } | null>(null)
+
+  const verify = async () => {
+    const issues: string[] = []
+    const doc = await PDFDocument.load(state.pdfBytes)
+
+    // Check 1: Hidden text under black rectangles
+    // We can't easily detect visual redactions, but we can check
+    // if text content exists that might be hidden
+
+    // Check 2: Metadata that might contain sensitive info
+    if (doc.getTitle()?.trim()) issues.push('Document title is set — may contain sensitive info')
+    if (doc.getAuthor()?.trim()) issues.push('Author field is set')
+
+    // Check 3: XMP metadata
+    if (doc.catalog.get(PDFName.of('Metadata'))) {
+      issues.push('XMP metadata stream present — may contain edit history')
+    }
+
+    // Check 4: Embedded JavaScript
+    if (doc.catalog.get(PDFName.of('OpenAction'))) {
+      issues.push('OpenAction present — could contain executable code')
+    }
+    const names = doc.catalog.get(PDFName.of('Names'))
+    if (names) {
+      const namesDict = doc.context.lookup(names) as PDFDict | undefined
+      if (namesDict?.get(PDFName.of('JavaScript'))) {
+        issues.push('Embedded JavaScript found')
+      }
+      if (namesDict?.get(PDFName.of('EmbeddedFiles'))) {
+        issues.push('Embedded file attachments found')
+      }
+    }
+
+    // Check 5: Annotations that might contain hidden content
+    let annotCount = 0
+    for (let i = 0; i < doc.getPageCount(); i++) {
+      const annots = doc.getPage(i).node.get(PDFName.of('Annots'))
+      if (annots) {
+        const arr = doc.context.lookup(annots) as any
+        if (arr?.size) annotCount += arr.size()
+      }
+    }
+    if (annotCount > 0) issues.push(`${annotCount} annotation(s) present — may contain comments or markup`)
+
+    // Check 6: Form fields
+    if (doc.catalog.get(PDFName.of('AcroForm'))) {
+      issues.push('Interactive form fields present — may contain submitted data')
+    }
+
+    // Check 7: Text extraction to detect hidden text
+    const extracted = await extractText(state.pdfBytes)
+    const totalChars = extracted.reduce((s, p) => s + p.items.reduce((s2, it) => s2 + it.str.length, 0), 0)
+    if (totalChars > 0) {
+      issues.push(`${totalChars} characters of extractable text remain — redacted text should be unextractable`)
+    }
+
+    const safe = issues.length === 0
+    setResult({ safe, issues })
+    onStatus(safe ? 'Redaction verification passed — no hidden data found.' : `Found ${issues.length} potential issue(s).`)
+  }
+
+  return (
+    <div data-testid="section-redact-verify">
+      <h4 style={{ marginTop: 0, fontSize: 13 }}>Redaction Verification</h4>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>Check if the PDF has been properly redacted and no hidden data remains.</div>
+      <button style={btn} onClick={verify}>Verify Redaction</button>
+
+      {result && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: result.safe ? 'var(--success)' : 'var(--danger)', marginBottom: 6 }}>
+            {result.safe ? 'Clean — no hidden data detected' : `${result.issues.length} issue(s) found`}
+          </div>
+          {result.issues.map((issue, i) => (
+            <div key={i} style={{ padding: '3px 0', fontSize: 11, borderBottom: '1px solid var(--border)' }}>
+              <span style={{ color: 'var(--danger)' }}>!</span> {issue}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

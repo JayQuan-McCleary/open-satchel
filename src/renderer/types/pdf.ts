@@ -43,6 +43,7 @@ export type Tool =
   | 'replace_text_marker'
   | 'measure'
   | 'form_designer'
+  | 'edit_text'
   // Fill & Sign quick-stamps
   | 'fill_cross'
   | 'fill_check'
@@ -94,4 +95,7 @@ export interface UIState {
   autoSaveEnabled: boolean
   autoSaveInterval: number
   autoSaveStatus: 'idle' | 'saving' | 'saved'
+  showRulers: boolean
+  showGrid: boolean
+  showLayers: boolean
 }

@@ -14,13 +14,8 @@ interface Props {
   onClose: () => void
 }
 
-function download(name: string, bytes: Uint8Array, mime = 'application/octet-stream') {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const blob = new Blob([bytes as any], { type: mime })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a'); a.href = url; a.download = name
-  document.body.appendChild(a); a.click(); document.body.removeChild(a)
-  URL.revokeObjectURL(url)
+async function download(_name: string, bytes: Uint8Array, _mime = 'application/octet-stream') {
+  await window.api.file.saveAs(bytes)
 }
 
 const title: Record<Mode, string> = {
@@ -45,6 +40,16 @@ export default function BatchDialog({ mode, onClose }: Props) {
     input.click()
   }
 
+  const pickFolder = async () => {
+    if (!window.api?.folder?.pick) { setStatus('Folder pick requires Electron.'); return }
+    const result = await window.api.folder.pick(['.pdf'])
+    if (!result || result.length === 0) { setStatus('No PDF files found in folder.'); return }
+    // Convert IPC results to File-like objects for the existing pipeline
+    const fileList = result.map(f => new File([f.bytes], f.name, { type: 'application/pdf' }))
+    setFiles(fileList)
+    setStatus(`Found ${fileList.length} PDF(s) in folder.`)
+  }
+
   const runPrint = async () => {
     setBusy(true)
     for (const f of files) {
@@ -61,10 +66,12 @@ export default function BatchDialog({ mode, onClose }: Props) {
 
   const runRename = async () => {
     setBusy(true)
-    files.forEach((f, i) => {
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i]
       const name = pattern.replace('{name}', f.name.replace(/\.pdf$/i, '')).replace('{n}', String(i + 1).padStart(3, '0')).replace('{prefix}', prefix) + '.pdf'
-      f.arrayBuffer().then((buf) => download(name, new Uint8Array(buf), 'application/pdf'))
-    })
+      const buf = await f.arrayBuffer()
+      await download(name, new Uint8Array(buf), 'application/pdf')
+    }
     setStatus(`Renamed & downloaded ${files.length} file(s).`)
     setBusy(false)
   }
@@ -74,7 +81,7 @@ export default function BatchDialog({ mode, onClose }: Props) {
     // "Collect" = zip-less grouping — just re-download each file with a common prefix
     for (let i = 0; i < files.length; i++) {
       const bytes = new Uint8Array(await files[i].arrayBuffer())
-      download(`${prefix || 'collected'}-${String(i + 1).padStart(3, '0')}.pdf`, bytes, 'application/pdf')
+      await download(`${prefix || 'collected'}-${String(i + 1).padStart(3, '0')}.pdf`, bytes, 'application/pdf')
     }
     setStatus(`Collected ${files.length} file(s) into prefix "${prefix || 'collected'}".`)
     setBusy(false)
@@ -86,12 +93,12 @@ export default function BatchDialog({ mode, onClose }: Props) {
       const bytes = new Uint8Array(await files[i].arrayBuffer())
       const base = files[i].name.replace(/\.pdf$/i, '')
       try {
-        if (target === 'compress') download(`${base}-compressed.pdf`, await compressPdf(bytes), 'application/pdf')
-        else if (target === 'word') download(`${base}.docx`, await pdfToWord(bytes), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
-        else if (target === 'ppt') download(`${base}.pptx`, await pdfToPpt(bytes), 'application/vnd.openxmlformats-officedocument.presentationml.presentation')
-        else if (target === 'excel') download(`${base}.xlsx`, await pdfToExcel(bytes), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-        else if (target === 'txt') { const t = await pdfToText(bytes); download(`${base}.txt`, new Uint8Array(new TextEncoder().encode(t)), 'text/plain') }
-        else if (target === 'imgonly') download(`${base}-image-only.pdf`, await toImageOnlyPdf(bytes), 'application/pdf')
+        if (target === 'compress') await download(`${base}-compressed.pdf`, await compressPdf(bytes), 'application/pdf')
+        else if (target === 'word') await download(`${base}.docx`, await pdfToWord(bytes), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+        else if (target === 'ppt') await download(`${base}.pptx`, await pdfToPpt(bytes), 'application/vnd.openxmlformats-officedocument.presentationml.presentation')
+        else if (target === 'excel') await download(`${base}.xlsx`, await pdfToExcel(bytes), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        else if (target === 'txt') { const t = await pdfToText(bytes); await download(`${base}.txt`, new Uint8Array(new TextEncoder().encode(t)), 'text/plain') }
+        else if (target === 'imgonly') await download(`${base}-image-only.pdf`, await toImageOnlyPdf(bytes), 'application/pdf')
       } catch (e) { setStatus(`Failed on ${files[i].name}: ${(e as Error).message}`) }
     }
     setStatus(`Converted ${files.length} file(s) → ${target}.`)
@@ -114,9 +121,14 @@ export default function BatchDialog({ mode, onClose }: Props) {
           <h3 style={{ margin: 0, fontSize: 14 }}>{title[mode]}</h3>
           <button onClick={onClose} style={{ fontSize: 18, background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>✕</button>
         </div>
-        <button data-testid="batch-pick" onClick={pick} style={{ padding: '6px 12px', background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
-          Pick PDFs… ({files.length} selected)
-        </button>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button data-testid="batch-pick" onClick={pick} style={{ padding: '6px 12px', background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
+            Pick PDFs… ({files.length} selected)
+          </button>
+          <button data-testid="batch-pick-folder" onClick={pickFolder} style={{ padding: '6px 12px', background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
+            Pick Folder…
+          </button>
+        </div>
         {mode === 'rename' && (
           <div style={{ marginTop: 10 }}>
             <label style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Pattern (use {'{name}'}, {'{n}'}, {'{prefix}'})</label>

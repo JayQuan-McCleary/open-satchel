@@ -3,7 +3,9 @@
 
 export interface CoordinateMapper {
   fabricToPdf: (x: number, y: number) => { x: number; y: number }
+  pdfToFabric: (x: number, y: number) => { x: number; y: number }
   sizeToPdf: (size: number) => number
+  sizeToFabric: (size: number) => number
   scaleToPdf: (value: number) => number
 }
 
@@ -22,7 +24,14 @@ export function createCoordinateMapper(
       y: pdfPageHeight - y * scaleY
     }),
 
+    pdfToFabric: (x: number, y: number) => ({
+      x: x / scaleX,
+      y: (pdfPageHeight - y) / scaleY
+    }),
+
     sizeToPdf: (size: number) => size * scaleY,
+
+    sizeToFabric: (size: number) => size / scaleY,
 
     scaleToPdf: (value: number) => value * scaleX
   }

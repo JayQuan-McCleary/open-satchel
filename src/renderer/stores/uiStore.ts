@@ -29,6 +29,9 @@ interface UIActions {
   setAutoSaveInterval: (ms: number) => void
   setAutoSaveStatus: (s: 'idle' | 'saving' | 'saved') => void
   toggleAutoSave: () => void
+  toggleRulers: () => void
+  toggleGrid: () => void
+  toggleLayers: () => void
 }
 
 const ZOOM_STEPS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0]
@@ -65,6 +68,9 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
   autoSaveEnabled: true,
   autoSaveInterval: 30000,
   autoSaveStatus: 'idle',
+  showRulers: false,
+  showGrid: false,
+  showLayers: false,
 
   setCurrentPage: (page) => set({ currentPage: page }),
   setZoom: (zoom) => set({ zoom: Math.max(0.25, Math.min(4.0, zoom)) }),
@@ -107,5 +113,8 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
   setAutoSaveEnabled: (v) => set({ autoSaveEnabled: v }),
   setAutoSaveInterval: (ms) => set({ autoSaveInterval: ms }),
   setAutoSaveStatus: (s) => set({ autoSaveStatus: s }),
-  toggleAutoSave: () => set((state) => ({ autoSaveEnabled: !state.autoSaveEnabled }))
+  toggleAutoSave: () => set((state) => ({ autoSaveEnabled: !state.autoSaveEnabled })),
+  toggleRulers: () => set((state) => ({ showRulers: !state.showRulers })),
+  toggleGrid: () => set((state) => ({ showGrid: !state.showGrid })),
+  toggleLayers: () => set((state) => ({ showLayers: !state.showLayers }))
 }))

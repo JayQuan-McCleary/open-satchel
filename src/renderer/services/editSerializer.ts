@@ -1,6 +1,11 @@
 import { PDFDocument, rgb, StandardFonts, PDFPage, PDFFont, degrees } from 'pdf-lib'
 import fontkit from '@pdf-lib/fontkit'
 import { createCoordinateMapper } from './coordinateMapper'
+import {
+  parseContentStream, getPageContentBytes, writePageContentBytes,
+  serializeContentStream, applyTextReplacement, encodeTextToBytes,
+} from './contentStreamParser'
+import { buildGlyphMaps, encodeWithGlyphMap } from './cmapResolver'
 import type { HeaderFooterConfig } from '../formats/pdf/index'
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -52,7 +57,8 @@ async function getFont(
   fontFamily: string,
   bold: boolean,
   italic: boolean,
-  customFontId?: string
+  customFontId?: string,
+  glyphs?: string
 ): Promise<PDFFont> {
   const cacheKey = `${fontFamily}-${bold}-${italic}-${customFontId || 'std'}`
   if (fontCache.has(cacheKey)) return fontCache.get(cacheKey)!
@@ -61,7 +67,13 @@ async function getFont(
 
   if (customFontId) {
     try {
-      const bytes = await window.api.font.getBytes(customFontId)
+      let bytes: Uint8Array
+      // Use IPC subsetting if glyphs are provided (main process has Node.js access for subset-font)
+      if (glyphs && glyphs.length > 0 && window.api?.font?.subset) {
+        bytes = await window.api.font.subset(customFontId, glyphs)
+      } else {
+        bytes = await window.api.font.getBytes(customFontId)
+      }
       font = await pdfDoc.embedFont(bytes)
     } catch {
       // Fallback to standard font if custom fails
@@ -73,6 +85,26 @@ async function getFont(
 
   fontCache.set(cacheKey, font)
   return font
+}
+
+/** Scan all pages to build a map of customFontId → characters used */
+function collectGlyphsPerFont(pages: any[]): Map<string, string> {
+  const map = new Map<string, string>()
+  for (const page of pages) {
+    if (!page.fabricJSON) continue
+    const objects = (page.fabricJSON as any).objects || []
+    for (const obj of objects) {
+      if ((obj.type === 'textbox' || obj.type === 'text' || obj.type === 'i-text') && obj.__customFontId) {
+        const existing = map.get(obj.__customFontId) || ''
+        map.set(obj.__customFontId, existing + (obj.text || ''))
+      }
+    }
+  }
+  // Deduplicate characters per font
+  for (const [id, chars] of map) {
+    map.set(id, [...new Set(chars)].join(''))
+  }
+  return map
 }
 
 // ── Save Options ─────────────────────────────────────────────────
@@ -91,6 +123,9 @@ export async function serializeEditsToPdf(
   options?: SerializeOptions
 ): Promise<Uint8Array> {
   fontCache.clear()
+
+  // Pre-compute glyph sets for font subsetting
+  const glyphMap = collectGlyphsPerFont(pages)
 
   const pdfDoc = await PDFDocument.load(originalBytes)
 
@@ -135,7 +170,99 @@ export async function serializeEditsToPdf(
     }
   }
 
-  // Apply fabric edits
+  // ── TextLayer edits (pdfjs TextLayer-based inline editing) ──────
+  // Each page may have _textLayerEdits: array of { spanIndex, originalText, newText }.
+  // These map directly to content stream text runs by index order.
+  for (let i = 0; i < activePages.length; i++) {
+    const pageState = activePages[i] as any
+    const textEdits = pageState._textLayerEdits
+    if (!textEdits || textEdits.length === 0) continue
+    if (i >= pdfDoc.getPageCount()) break
+
+    const streamData = getPageContentBytes(pdfDoc, i)
+    if (!streamData) continue
+
+    const parsed = parseContentStream(streamData.bytes)
+    let modified = false
+
+    for (const edit of textEdits) {
+      // Map span index to content stream text run index
+      // pdfjs textDivs are in the same order as getTextContent() items,
+      // which correspond 1:1 to our parsed textRuns (sequential Tj/TJ ops)
+      const run = parsed.textRuns[edit.spanIndex]
+      if (!run) continue
+
+      const newBytes = encodeTextToBytes(edit.newText)
+      applyTextReplacement(parsed, run.opIndex, newBytes, run.tjElementIndex)
+      modified = true
+    }
+
+    if (modified) {
+      const newBytes = serializeContentStream(parsed.operators, streamData.bytes)
+      writePageContentBytes(streamData.stream, newBytes, true)
+    }
+  }
+
+  // ── Fabric edit_text blocks (legacy overlay approach, kept as fallback) ──
+  for (let i = 0; i < activePages.length; i++) {
+    const pageState = activePages[i]
+    if (!pageState.fabricJSON) continue
+    if (i >= pdfDoc.getPageCount()) break
+
+    const fabricData = pageState.fabricJSON as any
+    const objects: any[] = fabricData.objects || []
+    const editBlocks = objects.filter((obj: any) =>
+      obj.__editTextBlock && obj.text !== obj.__originalText
+    )
+    if (editBlocks.length === 0) continue
+
+    const streamData = getPageContentBytes(pdfDoc, i)
+    if (!streamData) continue
+
+    const parsed = parseContentStream(streamData.bytes)
+
+    for (const block of editBlocks) {
+      const opIndices: number[] = block.__operatorIndices || []
+      const runs = block.__originalTextRuns || []
+      if (opIndices.length === 0 || runs.length === 0) continue
+
+      // Try to encode with CMap-aware glyph mapping
+      const firstRun = runs[0]
+      let encoded: Uint8Array | null = null
+
+      // Check if original was hex-encoded (likely CMap/glyph-indexed)
+      if (firstRun.rawString?.type === 'hex' && firstRun.rawString?.value) {
+        // Build glyph map from the run's data and try encoding
+        // For now, use simple Latin-1 encoding for hex strings
+        encoded = encodeTextToBytes(block.text)
+      } else {
+        encoded = encodeTextToBytes(block.text)
+      }
+
+      if (!encoded) continue
+
+      // Apply replacement to each matched operator
+      for (let j = 0; j < opIndices.length; j++) {
+        const opIdx = opIndices[j]
+        const run = runs[j]
+        if (!run) continue
+
+        // For multi-run blocks (text split across operators), we put
+        // the full edited text in the first operator and clear the rest
+        const textForThisOp = j === 0 ? block.text : ''
+        const bytes = encodeTextToBytes(textForThisOp)
+        if (bytes) {
+          applyTextReplacement(parsed, opIdx, bytes, run.tjElementIndex)
+        }
+      }
+    }
+
+    // Serialize and write back
+    const newBytes = serializeContentStream(parsed.operators, streamData.bytes)
+    writePageContentBytes(streamData.stream, newBytes, true)
+  }
+
+  // Apply fabric edits (skip __editTextBlock objects — they're now in the content stream)
   for (let i = 0; i < activePages.length; i++) {
     const pageState = activePages[i]
     if (!pageState.fabricJSON) continue
@@ -152,6 +279,8 @@ export async function serializeEditsToPdf(
     const objects = fabricData.objects || []
 
     for (const obj of objects) {
+      // Skip edit-text blocks — already handled via content stream replacement
+      if (obj.__editTextBlock) continue
       await renderFabricObject(pdfDoc, pdfPage, obj, mapper)
     }
   }
@@ -234,7 +363,8 @@ async function renderFabricObject(
         obj.fontFamily || 'Helvetica',
         obj.fontWeight === 'bold',
         obj.fontStyle === 'italic',
-        customFontId
+        customFontId,
+        customFontId ? glyphMap.get(customFontId) : undefined
       )
 
       const lines = text.split('\n')

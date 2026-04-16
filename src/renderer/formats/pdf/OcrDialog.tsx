@@ -74,6 +74,8 @@ export default function OcrDialog({ tabId, onClose }: Props) {
       }
 
       const allText: string[] = []
+      // For searchable mode, collect word-level OCR data per page
+      const ocrPageData: { pageNum: number; words: { text: string; x: number; y: number; w: number; h: number }[]; vpWidth: number; vpHeight: number }[] = []
       const scale = dpi / 72
 
       for (let i = 0; i < pagesToProcess.length; i++) {
@@ -110,7 +112,48 @@ export default function OcrDialog({ tabId, onClose }: Props) {
           }
         })
 
-        allText.push(result.data.text)
+        // Use block-level data for layout preservation when available
+        if (result.data.blocks && result.data.blocks.length > 0) {
+          // Sort blocks by vertical position, then reconstruct with spacing
+          const blocks = [...result.data.blocks].sort((a: any, b: any) => a.bbox.y0 - b.bbox.y0)
+          const layoutText = blocks.map((block: any) => {
+            if (!block.paragraphs) return block.text || ''
+            return block.paragraphs.map((para: any) => {
+              if (!para.lines) return para.text || ''
+              return para.lines.map((line: any) => {
+                if (!line.words) return line.text || ''
+                // Preserve horizontal spacing by detecting column gaps
+                const words = [...line.words].sort((a: any, b: any) => a.bbox.x0 - b.bbox.x0)
+                let text = ''
+                for (let w = 0; w < words.length; w++) {
+                  if (w > 0) {
+                    const gap = words[w].bbox.x0 - words[w - 1].bbox.x1
+                    // Large gap = tab/column separator
+                    text += gap > 30 ? '\t' : ' '
+                  }
+                  text += words[w].text
+                }
+                return text
+              }).join('\n')
+            }).join('\n\n')
+          }).join('\n\n\n')
+          allText.push(layoutText)
+        } else {
+          allText.push(result.data.text)
+        }
+
+        // Collect word bounding boxes for searchable PDF mode
+        if (outputMode === 'searchable' && result.data.words) {
+          const words = result.data.words.map((w: any) => ({
+            text: w.text,
+            x: w.bbox.x0 / scale,   // convert back to PDF points
+            y: w.bbox.y0 / scale,
+            w: (w.bbox.x1 - w.bbox.x0) / scale,
+            h: (w.bbox.y1 - w.bbox.y0) / scale,
+          }))
+          ocrPageData.push({ pageNum, words, vpWidth: viewport.width / scale, vpHeight: viewport.height / scale })
+        }
+
         page.cleanup()
       }
 
@@ -129,7 +172,6 @@ export default function OcrDialog({ tabId, onClose }: Props) {
         setProgress(100)
         setTimeout(() => onClose(), 1200)
       } else if (outputMode === 'newtab') {
-        // Create a simple text blob and open in new window
         const blob = new Blob([fullText], { type: 'text/plain' })
         const url = URL.createObjectURL(blob)
         window.open(url, '_blank')
@@ -137,9 +179,46 @@ export default function OcrDialog({ tabId, onClose }: Props) {
         setProgress(100)
         setTimeout(() => onClose(), 1200)
       } else {
-        // searchable PDF - coming soon
-        setStatusText('Make PDF searchable is coming soon.')
-        setProgress(100)
+        // Searchable PDF: embed invisible text layer behind page content
+        setStatusText('Building searchable PDF...')
+        try {
+          const { PDFDocument: PDFDoc, rgb: pdfRgb, StandardFonts: StdFonts } = await import('pdf-lib')
+          const pdfDoc = await PDFDoc.load(state.pdfBytes)
+          const font = await pdfDoc.embedFont(StdFonts.Helvetica)
+
+          for (const pageData of ocrPageData) {
+            const pdfPageIdx = pageData.pageNum - 1
+            if (pdfPageIdx >= pdfDoc.getPageCount()) continue
+            const pdfPage = pdfDoc.getPage(pdfPageIdx)
+            const { height: pageH } = pdfPage.getSize()
+
+            for (const word of pageData.words) {
+              if (!word.text.trim()) continue
+              const fontSize = Math.max(4, Math.min(word.h * 0.8, 20))
+              // Position: convert top-left canvas coords to PDF bottom-left coords
+              const pdfY = pageH - word.y - word.h
+              pdfPage.drawText(word.text, {
+                x: word.x,
+                y: pdfY,
+                size: fontSize,
+                font,
+                color: pdfRgb(0, 0, 0),
+                opacity: 0, // invisible — searchable only
+              })
+            }
+          }
+
+          const out = await pdfDoc.save()
+          useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({
+            ...prev, pdfBytes: out, pageCount: pdfDoc.getPageCount()
+          }))
+          useTabStore.getState().setTabDirty(tabId, true)
+          setStatusText(`Searchable PDF created! ${ocrPageData.reduce((s, p) => s + p.words.length, 0)} words embedded.`)
+          setProgress(100)
+          setTimeout(() => onClose(), 1500)
+        } catch (err: any) {
+          setStatusText(`Error creating searchable PDF: ${err.message}`)
+        }
       }
     } catch (err: any) {
       if (!cancelRef.current) {
@@ -234,7 +313,7 @@ export default function OcrDialog({ tabId, onClose }: Props) {
               <label style={radioLabelStyle}>
                 <input type="radio" name="ocr-output" checked={outputMode === 'searchable'}
                   onChange={() => setOutputMode('searchable')} disabled={running} />
-                Make PDF searchable (coming soon)
+                Make PDF searchable
               </label>
             </div>
           </div>
