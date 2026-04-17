@@ -23,11 +23,14 @@
 
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
-// NOTE: applyTextEditsToBytes was used here to blank original ops at
-// save time, but its pdfjs-item-index → parser-textRun-index mapping
-// proved unreliable (pdfjs inserts synthetic whitespace items that the
-// parser doesn't see, causing misaligned blanking). See the
-// applyParagraphEditsToBytes body for the full rationale.
+import {
+  parseContentStream,
+  serializeContentStream,
+  applyTextReplacement,
+  getPageContentBytes,
+  writePageContentBytes,
+  encodeTextToBytes,
+} from './contentStreamParser'
 
 export interface ParagraphEdit {
   paragraphId: string
@@ -113,32 +116,55 @@ export async function applyParagraphEditsToBytes(
 ): Promise<Uint8Array> {
   if (edits.length === 0) return pdfBytes
 
-  // Deliberately NO content-stream blanking here.
+  // Phase 1: blank the original text by POSITION (not by index).
   //
-  // Earlier versions called applyTextEditsToBytes to rewrite each item's
-  // Tj operator to an empty string, then drew a whiteout + new text on
-  // top. Two problems turned up in testing:
-  //   1. pdfjs emits synthetic whitespace items between real Tj ops (e.g.
-  //      a single " " item with width=239 filling the inter-column gap
-  //      between "Invoice" and "Date:" in the invoice header). Those
-  //      aren't in parser.textRuns, so spanIndex → textRun index drifts.
-  //      Blanking parser.textRuns[N] then blanks some UNRELATED real Tj
-  //      like the "Date:" label — which visibly disappears on save.
-  //   2. Re-extracting with pdfjs on the saved bytes picks up both the
-  //      original (failed-to-blank) Tj and the new drawText, so clustering
-  //      sees ghost duplicates.
+  // Earlier approach tried index-based blanking via pdfjs spanIndex →
+  // parser textRun index, but those streams diverge (pdfjs emits
+  // synthetic whitespace items that the parser never sees). The fix:
+  // the parser gives each textRun a PDF-user-space (x, y); we blank
+  // every run whose position falls INSIDE the paragraph's bbox.
+  // Position-matching is robust regardless of how many synthetic items
+  // pdfjs adds, and it doesn't over-reach because the bbox is already
+  // tight to the visible glyphs.
   //
-  // Solution: skip the content-stream rewrite entirely and rely on a
-  // background-colored mask rectangle (drawn below in the edit loop) to
-  // hide the original glyphs visually. The original Tj ops stay in the
-  // content stream but are rendered invisibly because the mask covers
-  // them; text-extraction tools still see the original text, which is
-  // acceptable for an editor that targets visual fidelity first.
-  //
-  // If we ever need clean extraction on saved files (e.g. for a
-  // searchable-PDF pipeline), we'll add a proper content-stream rewriter
-  // that works on a parser-derived index, not on pdfjs's item index.
+  // Previously the "safety" variant just painted a background-color
+  // mask rect and skipped blanking altogether. That produced visually
+  // clean canvas renders but left the original text alive in the
+  // content stream, so re-entering Edit mode showed "Invoice" +
+  // "Statement" overlapping when pdfjs re-extracted text. With
+  // position-based blanking, the saved PDF has NO "Invoice" Tj in the
+  // content stream — clean extraction, clean re-edit.
   let workingBytes = pdfBytes
+  {
+    const prebBlankDoc = await PDFDocument.load(workingBytes)
+    const prebBlankPage = prebBlankDoc.getPage(pageIndex)
+    const { height: pageH } = prebBlankPage.getSize()
+    const streamData = getPageContentBytes(prebBlankDoc, pageIndex)
+    if (streamData) {
+      const parsed = parseContentStream(streamData.bytes)
+      let modified = false
+      for (const edit of edits) {
+        // Convert viewport-top-left bbox → PDF user-space Y range.
+        const padY = Math.max(3, edit.fontSize * 0.25)
+        const padX = Math.max(2, edit.fontSize * 0.15)
+        const xMin = edit.bbox.x - padX
+        const xMax = edit.bbox.x + edit.bbox.width + padX
+        const yMinPdf = pageH - (edit.bbox.y + edit.bbox.height) - padY
+        const yMaxPdf = pageH - edit.bbox.y + padY
+        for (const run of parsed.textRuns) {
+          if (run.x >= xMin && run.x <= xMax && run.y >= yMinPdf && run.y <= yMaxPdf) {
+            applyTextReplacement(parsed, run.opIndex, encodeTextToBytes(''), run.tjElementIndex)
+            modified = true
+          }
+        }
+      }
+      if (modified) {
+        const newStream = serializeContentStream(parsed.operators, streamData.bytes)
+        writePageContentBytes(streamData.stream, newStream, true)
+        workingBytes = new Uint8Array(await prebBlankDoc.save())
+      }
+    }
+  }
 
   const doc = await PDFDocument.load(workingBytes)
   const pdfPage = doc.getPage(pageIndex)

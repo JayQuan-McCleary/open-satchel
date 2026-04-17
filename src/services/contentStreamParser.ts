@@ -714,6 +714,107 @@ export function applyTextReplacementWithReflow(
 
 // ── Stream Access ──────────────────────────────────────────────────
 
+/** Decode a content stream's raw bytes, respecting a filter chain.
+ *  Supports single names and filter arrays (e.g. `[/ASCII85Decode /FlateDecode]`).
+ *  The January/February/March invoice PDFs we test against use exactly
+ *  that chain — until this decoder landed, getPageContentBytes silently
+ *  returned the ASCII85-encoded bytes as if they were plaintext ops,
+ *  which the parser then couldn't make sense of. */
+function filterNames(filterVal: unknown): string[] {
+  if (!filterVal) return []
+  // PDFArray of /Name entries
+  const asArray = (filterVal as { asArray?: () => unknown[] }).asArray
+  if (typeof asArray === 'function') {
+    const arr = asArray.call(filterVal)
+    const out: string[] = []
+    for (const f of arr) {
+      const asString = (f as { asString?: () => string }).asString
+      out.push(typeof asString === 'function' ? asString.call(f) : String(f))
+    }
+    return out
+  }
+  // Single /Name
+  const asString = (filterVal as { asString?: () => string }).asString
+  if (typeof asString === 'function') return [asString.call(filterVal)]
+  return [String(filterVal)]
+}
+
+function ascii85Decode(input: Uint8Array): Uint8Array {
+  // ASCII85: 5 chars → 4 bytes. 'z' shortcut = 4 zero bytes. End marker: '~>'.
+  let s = ''
+  // Decode as latin1 — ASCII85 output is all ASCII 33-117.
+  for (let i = 0; i < input.length; i++) s += String.fromCharCode(input[i])
+  if (s.startsWith('<~')) s = s.slice(2)
+  const end = s.indexOf('~>')
+  if (end >= 0) s = s.slice(0, end)
+  s = s.replace(/\s/g, '')
+  const out: number[] = []
+  let i = 0
+  while (i < s.length) {
+    if (s[i] === 'z') {
+      out.push(0, 0, 0, 0)
+      i++
+      continue
+    }
+    let acc = 0
+    let chars = 0
+    while (chars < 5 && i < s.length) {
+      const c = s.charCodeAt(i)
+      i++
+      if (c < 33 || c > 117) continue
+      acc = acc * 85 + (c - 33)
+      chars++
+    }
+    if (chars === 0) break
+    const pad = 5 - chars
+    for (let j = 0; j < pad; j++) acc = acc * 85 + 84
+    out.push((acc >>> 24) & 0xff, (acc >>> 16) & 0xff, (acc >>> 8) & 0xff, acc & 0xff)
+    if (pad > 0) out.length -= pad
+  }
+  return new Uint8Array(out)
+}
+
+function asciiHexDecode(input: Uint8Array): Uint8Array {
+  let s = ''
+  for (let i = 0; i < input.length; i++) s += String.fromCharCode(input[i])
+  const end = s.indexOf('>')
+  if (end >= 0) s = s.slice(0, end)
+  s = s.replace(/\s/g, '')
+  if (s.length % 2 === 1) s += '0'
+  const out = new Uint8Array(s.length / 2)
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16)
+  }
+  return out
+}
+
+function decodeStream(raw: Uint8Array, filterVal: unknown): Uint8Array {
+  const names = filterNames(filterVal)
+  let current = raw
+  for (const name of names) {
+    switch (name) {
+      case '/FlateDecode':
+      case '/Fl':
+        current = new Uint8Array(pako.inflate(current))
+        break
+      case '/ASCII85Decode':
+      case '/A85':
+        current = ascii85Decode(current)
+        break
+      case '/ASCIIHexDecode':
+      case '/AHx':
+        current = asciiHexDecode(current)
+        break
+      default:
+        // Unknown/unsupported filter — bail out; caller gets whatever
+        // partial decode we achieved, and the parser will skip what it
+        // can't understand.
+        return current
+    }
+  }
+  return current
+}
+
 /** Get decompressed content stream bytes for a page */
 export function getPageContentBytes(
   pdfDoc: PDFDocument,
@@ -729,37 +830,34 @@ export function getPageContentBytes(
 
     // Handle PDFArray of content streams (concatenate)
     if ('size' in resolved && typeof (resolved as any).size === 'function') {
-      // It's a PDFArray — concatenate all streams
       const arr = resolved as any
       const allBytes: number[] = []
       for (let i = 0; i < arr.size(); i++) {
         const ref = arr.get(i)
         const stream = pdfDoc.context.lookup(ref) as PDFRawStream
         if (stream && 'getContents' in stream) {
-          const filter = stream.dict?.get(PDFName.of('Filter'))
+          const filterVal = stream.dict?.get(PDFName.of('Filter'))
           const raw = stream.getContents()
-          const decompressed = filter?.toString() === '/FlateDecode'
-            ? Array.from(pako.inflate(raw))
-            : Array.from(raw)
-          allBytes.push(...decompressed)
-          allBytes.push(CharCode.LF) // newline between streams
+          const decoded = decodeStream(raw, filterVal)
+          for (let j = 0; j < decoded.length; j++) allBytes.push(decoded[j])
+          allBytes.push(CharCode.LF)
         }
       }
-      // Return the first stream ref for writing back
       const firstRef = arr.get(0)
       const firstStream = pdfDoc.context.lookup(firstRef) as PDFRawStream
       return { stream: firstStream, bytes: new Uint8Array(allBytes), isCompressed: true }
     }
 
-    // Single stream
+    // Single stream (may still have a filter chain)
     const stream = resolved as PDFRawStream
     if (!stream || !('getContents' in stream)) return null
-    const filter = stream.dict?.get(PDFName.of('Filter'))
-    const isCompressed = filter?.toString() === '/FlateDecode'
+    const filterVal = stream.dict?.get(PDFName.of('Filter'))
     const raw = stream.getContents()
-    const bytes = isCompressed ? new Uint8Array(pako.inflate(raw)) : raw
+    const bytes = decodeStream(raw, filterVal)
+    const isCompressed = filterNames(filterVal).length > 0
     return { stream, bytes, isCompressed }
-  } catch {
+  } catch (err) {
+    console.warn('[contentStreamParser] getPageContentBytes failed:', err)
     return null
   }
 }
