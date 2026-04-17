@@ -28,7 +28,7 @@ import {
   serializeContentStream,
   applyTextReplacement,
   getPageContentBytes,
-  writePageContentBytes,
+  replacePageContents,
   encodeTextToBytes,
 } from './contentStreamParser'
 
@@ -160,7 +160,14 @@ export async function applyParagraphEditsToBytes(
       }
       if (modified) {
         const newStream = serializeContentStream(parsed.operators, streamData.bytes)
-        writePageContentBytes(streamData.stream, newStream, true)
+        // replacePageContents flattens PDFArray-backed page content (which
+        // pd-lib emits after each round-trip when we call drawText) into a
+        // single stream. writePageContentBytes only wrote to the first
+        // array entry, letting text drawn into later entries (like the
+        // "Statement" we added on the previous save) survive blanking on
+        // the next save — that's the "Statement Receipt" stacked-ghost
+        // bug caught in live testing.
+        replacePageContents(prebBlankDoc, pageIndex, newStream)
         workingBytes = new Uint8Array(await prebBlankDoc.save())
       }
     }

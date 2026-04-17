@@ -862,7 +862,40 @@ export function getPageContentBytes(
   }
 }
 
-/** Write modified content stream bytes back to the page */
+/**
+ * Replace a page's entire Contents with a single new flate-compressed
+ * stream.
+ *
+ * Why we need this beyond writePageContentBytes(): once pd-lib saves a
+ * page and we round-trip through pd-lib-flavoured drawing ops, the page
+ * Contents becomes a PDFArray of multiple streams (one per drawing
+ * chunk pd-lib emitted). writePageContentBytes only touches the first
+ * array entry, so content drawn in a later entry survives blanking.
+ * For paragraph-edit blanking we've already concatenated all parts via
+ * getPageContentBytes — the right finishing move is to stamp the merged
+ * + blanked bytes back as a SINGLE stream and repoint Contents there.
+ */
+export function replacePageContents(
+  pdfDoc: PDFDocument,
+  pageIndex: number,
+  newBytes: Uint8Array,
+): void {
+  const page = pdfDoc.getPage(pageIndex)
+  const compressed = pako.deflate(newBytes)
+  // Register a fresh stream in the indirect object table.
+  const dict = pdfDoc.context.obj({
+    Length: compressed.length,
+    Filter: 'FlateDecode',
+  })
+  const newStream = (PDFRawStream as unknown as {
+    of: (d: unknown, b: Uint8Array) => PDFRawStream
+  }).of(dict as unknown as object, compressed)
+  const ref = pdfDoc.context.register(newStream)
+  page.node.set(PDFName.of('Contents'), ref)
+}
+
+/** Write modified content stream bytes back to the page (legacy path;
+ *  single-stream only, does NOT handle PDFArray-backed content). */
 export function writePageContentBytes(
   stream: PDFRawStream,
   newBytes: Uint8Array,
