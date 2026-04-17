@@ -75,18 +75,35 @@ export interface ClusteringOptions {
   lineTolerance?: number
   /** Fraction of fontSize allowed as gap before we split paragraphs. */
   paragraphGapFactor?: number
-  /** Multiple of fontSize that counts as a column break within one y-line. */
+  /** Multiple of fontSize that counts as a column break within one y-line.
+   *  Defaults to 0.8 — tighter than earlier versions and aligned with pdf.js's
+   *  own SPACE_IN_FLOW_MAX_FACTOR (0.6) and pdfminer's char_margin (~1.0 of
+   *  fontSize). This splits "Date:  2026-01-24" into two paragraphs when the
+   *  label and value sit in separate pdfjs items. */
   columnGapFactor?: number
   /** Max x-offset (in px) between line segments to consider them in the
    *  same column when forming paragraphs. */
   columnAlignmentTolerance?: number
+  /** A whitespace-only pdfjs item whose width is ≥ this multiple of fontSize
+   *  is treated as a COLUMN SEPARATOR regardless of x-gap (pdfjs reports the
+   *  gap between columns as a single synthetic " " item with large width,
+   *  which our naive item-to-item gap check would see as gap=0 because the
+   *  items touch). Splitting on those makes invoice "Invoice | Date:" and
+   *  "Date: | 2026-01-24" layouts produce separate edit boxes. */
+  whitespaceItemSplitFactor?: number
+  /** If the left segment of two items ends with ':' and the x-gap between
+   *  them is ≥ this multiple of fontSize, force a split. Captures the
+   *  "Label: Value" pattern industry-standard key/value detectors use. */
+  labelColonGapFactor?: number
 }
 
 const DEFAULT_OPTS: Required<ClusteringOptions> = {
   lineTolerance: 0.4,
   paragraphGapFactor: 1.8,
-  columnGapFactor: 2.2,
+  columnGapFactor: 0.8,
   columnAlignmentTolerance: 8,
+  whitespaceItemSplitFactor: 0.8,
+  labelColonGapFactor: 0.3,
 }
 
 // pdfjs's `textContent.styles` is keyed by the same id as item.fontName.
@@ -288,22 +305,77 @@ export async function clusterParagraphs(
 
   const flushYLine = () => {
     if (currentYLine.length === 0) return
-    // Sort by x to walk left-to-right.
     currentYLine.sort((a, b) => a.geom.x - b.geom.x)
-    // Split this y-line into segments wherever an x-gap exceeds the
-    // column-gap threshold.
-    let segStart = 0
+
+    // Two-pass: first collect split-before indices + items to drop, then
+    // build segments. Keeps the control flow simple and guarantees
+    // buildSegment never receives an empty array.
+    const splitBefore = new Set<number>() // index i where a new segment begins
+    const dropItems = new Set<number>()   // indices to omit from every segment
+
+    const isWideWs = (it: ItemPlus): boolean =>
+      /^\s+$/.test(it.item.str) &&
+      it.geom.width >= it.geom.fontSize * opts.whitespaceItemSplitFactor
+
+    // Any leading wide-whitespace item on a line is a layout gap, not
+    // editable content — drop and start the first real segment after it.
+    if (currentYLine.length > 0 && isWideWs(currentYLine[0])) {
+      dropItems.add(0)
+      splitBefore.add(1)
+    }
+
     for (let i = 1; i < currentYLine.length; i++) {
       const prev = currentYLine[i - 1]
       const cur = currentYLine[i]
       const gap = cur.geom.x - (prev.geom.x + prev.geom.width)
-      const threshold = Math.max(prev.geom.fontSize, cur.geom.fontSize) * opts.columnGapFactor
-      if (gap > threshold) {
-        segments.push(buildSegment(currentYLine.slice(segStart, i)))
+      const fs = Math.max(prev.geom.fontSize, cur.geom.fontSize)
+
+      // Signal 1 — visible x-gap between non-whitespace atoms.
+      const gapSplit = gap > fs * opts.columnGapFactor
+
+      // Signal 2 — pdfjs often emits a single synthetic " " item with
+      // large width to encode an inter-column gap. The atoms around it
+      // touch with gap=0, so we detect the whitespace item directly and
+      // split BOTH sides of it.
+      const curWide = isWideWs(cur)
+      const prevWide = isWideWs(prev)
+
+      // Signal 3 — label:value. "Date:" + any nontrivial gap + value.
+      const prevStr = prev.item.str.trimEnd()
+      const colonSplit =
+        prevStr.endsWith(':') && gap >= fs * opts.labelColonGapFactor
+
+      if (curWide) {
+        splitBefore.add(i + 1)
+        dropItems.add(i)
+      } else if (prevWide) {
+        splitBefore.add(i)
+      } else if (gapSplit || colonSplit) {
+        splitBefore.add(i)
+      }
+    }
+
+    // Walk the line emitting segments bounded by split points, filtering
+    // out dropped items. Skip any resulting segment that's all whitespace.
+    const emitSegment = (from: number, to: number) => {
+      const items: ItemPlus[] = []
+      for (let k = from; k < to; k++) {
+        if (!dropItems.has(k)) items.push(currentYLine[k])
+      }
+      if (items.length === 0) return
+      const hasNonWs = items.some((it) => !/^\s*$/.test(it.item.str))
+      if (!hasNonWs) return
+      segments.push(buildSegment(items))
+    }
+
+    let segStart = 0
+    for (let i = 1; i <= currentYLine.length; i++) {
+      if (i === currentYLine.length || splitBefore.has(i)) {
+        emitSegment(segStart, i)
         segStart = i
       }
     }
-    segments.push(buildSegment(currentYLine.slice(segStart)))
+
     currentYLine = []
     currentBaseline = null
     currentFontSize = 0
