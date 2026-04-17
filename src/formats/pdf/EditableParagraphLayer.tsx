@@ -18,7 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { useFormatStore } from '../../stores/formatStore'
 import { useTabStore } from '../../stores/tabStore'
-import { clusterParagraphs, type ParagraphBox } from '../../services/pdfParagraphs'
+import { clusterParagraphs, type ParagraphBox, type TextItem } from '../../services/pdfParagraphs'
 import type { ParagraphEdit } from '../../services/pdfParagraphEdits'
 import type { PdfFormatState } from './index'
 
@@ -102,11 +102,26 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabId, pageIndex, paragraphs.length])
 
+  // Items snapshot from the most recent cluster call. We need this at
+  // commit time so each edit carries the pdfjs TextLayer indices of
+  // every run it replaces — the save pipeline uses those to blank the
+  // original ops in the content stream (no ghost text on re-extract).
+  const itemsRef = useRef<TextItem[]>([])
+  useEffect(() => {
+    let cancelled = false
+    clusterParagraphs(pdfDoc, pageIndex).then((res) => {
+      if (cancelled) return
+      itemsRef.current = res.items
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [pdfDoc, pageIndex])
+
   const commitEdit = useCallback(
     (para: ParagraphBox, newText: string) => {
       const existing = readPendingEditsForPage(tabId, pageIndex)
       const without = existing.filter((e) => e.paragraphId !== para.id)
       const isNoop = newText === para.originalText
+      const itemOriginalTexts = para.itemIndices.map((idx) => itemsRef.current[idx]?.str ?? '')
       const next: ParagraphEdit[] = isNoop
         ? without
         : [
@@ -117,6 +132,8 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
               originalText: para.originalText,
               newText,
               fontSize: para.fontSize,
+              itemIndices: [...para.itemIndices],
+              itemOriginalTexts,
             },
           ]
       writePendingEditsForPage(tabId, pageIndex, next)

@@ -95,7 +95,14 @@ export const pdfHandler: FormatHandler = {
           workingBytes,
           page.pageIndex,
           paraEdits,
-          { fallbackFont: (fallback as any) || 'Helvetica' },
+          {
+            fallbackFont: (fallback as any) || 'Helvetica',
+            // Pass the pdfjs doc we opened above so applyParagraphEditsToBytes
+            // can blank CMap-encoded runs via whiteout fallback inside
+            // applyTextEditsToBytes. Without this, CMap fonts would leave
+            // ghost text in the content stream.
+            pdfjsDoc: pdfjsDocForWhiteout,
+          },
         )
         pagesWithParaEdits.add(page.pageIndex)
       }

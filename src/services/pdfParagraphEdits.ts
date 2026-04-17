@@ -22,6 +22,8 @@
 //     import), we skip the whiteout and use the real embedded font.
 
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib'
+import type { PDFDocumentProxy } from 'pdfjs-dist'
+import { applyTextEditsToBytes, type TextLayerEdit } from './pdfTextEdits'
 
 export interface ParagraphEdit {
   paragraphId: string
@@ -33,11 +35,30 @@ export interface ParagraphEdit {
   fontSize: number
   /** Color hex if known; defaults to black. */
   color?: string
+  /**
+   * pdfjs TextLayer indices of every item that belongs to this paragraph.
+   * Used at save time to blank those runs in the content stream so pdfjs
+   * doesn't extract ghost text on the next edit. Emitted by the clustering
+   * service when a paragraph is edited.
+   */
+  itemIndices?: number[]
+  /**
+   * Original text for each item — same length as itemIndices — so we can
+   * build TextLayerEdits that blank the right runs without re-parsing.
+   */
+  itemOriginalTexts?: string[]
 }
 
 export interface ApplyParagraphOptions {
   /** Fallback system font for substitution when the original isn't available. */
   fallbackFont?: keyof typeof StandardFonts
+  /**
+   * Optional pdfjs document for the content-stream rewrite + whiteout
+   * fallback path. When provided, we ask applyTextEditsToBytes to blank
+   * the original content-stream ops before we draw the replacement, so
+   * pdfjs can't extract ghost text on subsequent edits.
+   */
+  pdfjsDoc?: PDFDocumentProxy | null
 }
 
 function hexToRgb01(hex: string | undefined): { r: number; g: number; b: number } {
@@ -88,7 +109,42 @@ export async function applyParagraphEditsToBytes(
 ): Promise<Uint8Array> {
   if (edits.length === 0) return pdfBytes
 
-  const doc = await PDFDocument.load(pdfBytes)
+  // Phase 1: blank the original text's content-stream operators so that
+  // pdfjs re-extraction on future edits doesn't find the old glyphs.
+  // Without this, our whiteout + redraw approach leaves a "ghost" copy
+  // of the original text alive in the content stream — visually masked
+  // by the white rect, but still in the document. Clustering on the
+  // saved PDF then sees both copies and produces duplicate paragraphs.
+  //
+  // We convert every item in every edited paragraph into a TextLayerEdit
+  // that replaces its text with "". applyTextEditsToBytes handles both
+  // the standard-encoded path (rewrite Tj) and the CMap/hex path
+  // (whiteout + redraw with Helvetica). For paragraph edits the CMap
+  // whiteout would duplicate work, but the second rect is harmless —
+  // same white-on-white — and cheaper than a separate code path.
+  let workingBytes = pdfBytes
+  const blankEdits: TextLayerEdit[] = []
+  for (const edit of edits) {
+    if (!edit.itemIndices || !edit.itemOriginalTexts) continue
+    const n = Math.min(edit.itemIndices.length, edit.itemOriginalTexts.length)
+    for (let i = 0; i < n; i++) {
+      blankEdits.push({
+        spanIndex: edit.itemIndices[i],
+        originalText: edit.itemOriginalTexts[i],
+        newText: '',
+      })
+    }
+  }
+  if (blankEdits.length > 0) {
+    workingBytes = await applyTextEditsToBytes(
+      workingBytes,
+      pageIndex,
+      blankEdits,
+      options.pdfjsDoc ?? null,
+    )
+  }
+
+  const doc = await PDFDocument.load(workingBytes)
   const pdfPage = doc.getPage(pageIndex)
   const { height: pageHeight } = pdfPage.getSize()
 
