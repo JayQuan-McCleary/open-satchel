@@ -54,6 +54,11 @@ export interface ParagraphBox {
    *  the editor can render edits in white-on-dark without the user
    *  having to set color manually. */
   onDarkBackground: boolean
+  /** Sampled background color (hex). Used by save to paint an
+   *  invisible-on-the-real-background mask over the original text
+   *  before drawing the replacement. Avoids the white-rect-on-dark-
+   *  header bug. */
+  backgroundColor: string
 }
 
 export interface Line {
@@ -203,10 +208,24 @@ export function sampleParagraphColors(
       if (count === 0) return p
       bgLum /= count
       const isDark = bgLum < 0.5
+      // Compute the actual bg RGB mean so save can draw a matching
+      // rectangle over the paragraph (invisible on both dark and light
+      // backgrounds) instead of a hard-coded white rect.
+      let rSum = 0, gSum = 0, bSum = 0, cnt = 0
+      for (let i = 0; i < bg.length; i += 4) {
+        const a = bg[i + 3] / 255
+        if (a < 0.1) continue
+        rSum += bg[i]; gSum += bg[i + 1]; bSum += bg[i + 2]; cnt++
+      }
+      const avgR = cnt > 0 ? rSum / cnt / 255 : 1
+      const avgG = cnt > 0 ? gSum / cnt / 255 : 1
+      const avgB = cnt > 0 ? bSum / cnt / 255 : 1
+      const toHex = (v: number) => Math.round(v * 255).toString(16).padStart(2, '0')
       return {
         ...p,
         color: isDark ? '#ffffff' : '#000000',
         onDarkBackground: isDark,
+        backgroundColor: `#${toHex(avgR)}${toHex(avgG)}${toHex(avgB)}`,
       }
     } catch {
       // CORS-tainted canvas or other getImageData failure → leave defaults.
@@ -358,8 +377,25 @@ export async function clusterParagraphs(
         fontNames.push(it.item.fontName)
         minX = Math.min(minX, it.geom.x)
         minY = Math.min(minY, it.geom.y)
-        maxX = Math.max(maxX, it.geom.x + it.geom.width)
+        // Only extend the paragraph's right edge for items that actually
+        // render glyphs. pdfjs reports layout-gap whitespace as items
+        // with large widths (e.g. between "Invoice" and "Date:" in the
+        // invoice header we saw a single " " with width=239 filling the
+        // inter-column space). Including that in maxX makes our save-time
+        // mask rect cover the next column too — visible bug where
+        // editing "Invoice" wipes out the "Date:" label. Skip those.
+        const isWhitespaceOnly = !it.item.str || /^\s*$/.test(it.item.str)
+        if (!isWhitespaceOnly) {
+          maxX = Math.max(maxX, it.geom.x + it.geom.width)
+        }
         maxY = Math.max(maxY, it.geom.y + it.geom.height)
+      }
+    }
+    // If every item was whitespace (rare), fall back to the segment's
+    // geometric right edge so the bbox still has non-zero width.
+    if (maxX === -Infinity) {
+      for (const seg of currentPara) {
+        maxX = Math.max(maxX, seg.xRight)
       }
     }
     const fontName = mostCommon(fontNames)
@@ -377,6 +413,7 @@ export async function clusterParagraphs(
       italic: isItalicName(fontName),
       color: '#000000',
       onDarkBackground: false,
+      backgroundColor: '#ffffff',
     })
     currentPara = []
   }

@@ -23,7 +23,11 @@
 
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
-import { applyTextEditsToBytes, type TextLayerEdit } from './pdfTextEdits'
+// NOTE: applyTextEditsToBytes was used here to blank original ops at
+// save time, but its pdfjs-item-index → parser-textRun-index mapping
+// proved unreliable (pdfjs inserts synthetic whitespace items that the
+// parser doesn't see, causing misaligned blanking). See the
+// applyParagraphEditsToBytes body for the full rationale.
 
 export interface ParagraphEdit {
   paragraphId: string
@@ -33,19 +37,18 @@ export interface ParagraphEdit {
   newText: string
   /** Font size from the original paragraph (PDF user-space units). */
   fontSize: number
-  /** Color hex if known; defaults to black. */
+  /** Text color hex (sampled from canvas — white on dark bg, black on light). */
   color?: string
+  /** Background color hex (sampled from canvas — used for the "whiteout"
+   *  rect which is actually whatever-color-the-background-is to blend in). */
+  backgroundColor?: string
   /**
    * pdfjs TextLayer indices of every item that belongs to this paragraph.
    * Used at save time to blank those runs in the content stream so pdfjs
-   * doesn't extract ghost text on the next edit. Emitted by the clustering
-   * service when a paragraph is edited.
+   * doesn't extract ghost text on the next edit.
    */
   itemIndices?: number[]
-  /**
-   * Original text for each item — same length as itemIndices — so we can
-   * build TextLayerEdits that blank the right runs without re-parsing.
-   */
+  /** Original text for each item — same length as itemIndices. */
   itemOriginalTexts?: string[]
 }
 
@@ -109,40 +112,32 @@ export async function applyParagraphEditsToBytes(
 ): Promise<Uint8Array> {
   if (edits.length === 0) return pdfBytes
 
-  // Phase 1: blank the original text's content-stream operators so that
-  // pdfjs re-extraction on future edits doesn't find the old glyphs.
-  // Without this, our whiteout + redraw approach leaves a "ghost" copy
-  // of the original text alive in the content stream — visually masked
-  // by the white rect, but still in the document. Clustering on the
-  // saved PDF then sees both copies and produces duplicate paragraphs.
+  // Deliberately NO content-stream blanking here.
   //
-  // We convert every item in every edited paragraph into a TextLayerEdit
-  // that replaces its text with "". applyTextEditsToBytes handles both
-  // the standard-encoded path (rewrite Tj) and the CMap/hex path
-  // (whiteout + redraw with Helvetica). For paragraph edits the CMap
-  // whiteout would duplicate work, but the second rect is harmless —
-  // same white-on-white — and cheaper than a separate code path.
+  // Earlier versions called applyTextEditsToBytes to rewrite each item's
+  // Tj operator to an empty string, then drew a whiteout + new text on
+  // top. Two problems turned up in testing:
+  //   1. pdfjs emits synthetic whitespace items between real Tj ops (e.g.
+  //      a single " " item with width=239 filling the inter-column gap
+  //      between "Invoice" and "Date:" in the invoice header). Those
+  //      aren't in parser.textRuns, so spanIndex → textRun index drifts.
+  //      Blanking parser.textRuns[N] then blanks some UNRELATED real Tj
+  //      like the "Date:" label — which visibly disappears on save.
+  //   2. Re-extracting with pdfjs on the saved bytes picks up both the
+  //      original (failed-to-blank) Tj and the new drawText, so clustering
+  //      sees ghost duplicates.
+  //
+  // Solution: skip the content-stream rewrite entirely and rely on a
+  // background-colored mask rectangle (drawn below in the edit loop) to
+  // hide the original glyphs visually. The original Tj ops stay in the
+  // content stream but are rendered invisibly because the mask covers
+  // them; text-extraction tools still see the original text, which is
+  // acceptable for an editor that targets visual fidelity first.
+  //
+  // If we ever need clean extraction on saved files (e.g. for a
+  // searchable-PDF pipeline), we'll add a proper content-stream rewriter
+  // that works on a parser-derived index, not on pdfjs's item index.
   let workingBytes = pdfBytes
-  const blankEdits: TextLayerEdit[] = []
-  for (const edit of edits) {
-    if (!edit.itemIndices || !edit.itemOriginalTexts) continue
-    const n = Math.min(edit.itemIndices.length, edit.itemOriginalTexts.length)
-    for (let i = 0; i < n; i++) {
-      blankEdits.push({
-        spanIndex: edit.itemIndices[i],
-        originalText: edit.itemOriginalTexts[i],
-        newText: '',
-      })
-    }
-  }
-  if (blankEdits.length > 0) {
-    workingBytes = await applyTextEditsToBytes(
-      workingBytes,
-      pageIndex,
-      blankEdits,
-      options.pdfjsDoc ?? null,
-    )
-  }
 
   const doc = await PDFDocument.load(workingBytes)
   const pdfPage = doc.getPage(pageIndex)
@@ -156,23 +151,40 @@ export async function applyParagraphEditsToBytes(
     const pdfY = pageHeight - edit.bbox.y - edit.bbox.height
     const { x, width, height } = edit.bbox
 
-    // NOTE: prior versions drew a big white rect here as a whiteout.
-    // That ran BEFORE we had content-stream blanking (the step 1 above
-    // via applyTextEditsToBytes), so painting white was the only way to
-    // hide the original glyphs.
+    // Draw a MASK rectangle over the paragraph in the detected
+    // BACKGROUND color. On the dark invoice header this draws a dark
+    // rect (invisible against the black bar); on white body paragraphs
+    // it draws a white rect (invisible against the page).
     //
-    // Now that step 1 actually removes the operators, the whiteout is
-    // redundant — and worse, it broke dark-background paragraphs by
-    // painting a white rectangle on top of e.g. the black invoice
-    // header bar (see screenshot from live testing: editing "Invoice"
-    // turned the whole header into a white strip).
-    //
-    // For CMap-encoded runs, applyTextEditsToBytes already draws
-    // targeted per-item whiteouts inside itself — small rects on each
-    // glyph run, not a fat paragraph-sized rect. That's tight enough to
-    // not damage surrounding layout.
-    //
-    // TL;DR: we rely on step 1 to erase, and only redraw text here.
+    // This sidesteps the content-stream blanking's index-mismatch bug
+    // (pdfjs emits synthetic space items that the parser doesn't see,
+    // so spanIndex → textRun index mapping is unreliable in practice
+    // — blanking the wrong run leaves the original "Invoice" text
+    // alive in the content stream and you get "InvoiceINV 2026" after
+    // save). By painting the exact bg color over the bbox, we fully
+    // mask the original glyphs regardless of how the content stream
+    // is structured, without any visible rect.
+    const bg = hexToRgb01(edit.backgroundColor ?? '#ffffff')
+    // Pad generously — pdfjs's item.width is the advance width and
+    // doesn't cover all glyph bearings. 25% of fontSize vertically +
+    // 25% of width horizontally covers metric differences and any
+    // overhangs.
+    // Keep padding modest on the right so the mask doesn't bleed into
+    // neighbouring paragraphs (e.g. "Invoice" title and "Date:" column
+    // sit very close horizontally). Clustering already trims trailing
+    // whitespace from the bbox's right edge, so the bbox itself is
+    // accurate; these are just antialiasing + metric-mismatch buffers.
+    const padY = Math.max(3, edit.fontSize * 0.25)
+    const padX = Math.max(2, edit.fontSize * 0.15)
+    const widthBuffer = Math.min(edit.fontSize * 0.3, 6)
+    pdfPage.drawRectangle({
+      x: x - padX,
+      y: pdfY - padY,
+      width: width + padX * 2 + widthBuffer,
+      height: height + padY * 2,
+      color: rgb(bg.r, bg.g, bg.b),
+      opacity: 1,
+    })
 
     // 2. Draw new text inside the bbox.
     if (edit.newText.trim()) {

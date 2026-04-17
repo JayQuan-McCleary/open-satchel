@@ -1,16 +1,21 @@
 // High-level app actions invoked from the toolbar, shortcuts, and command
 // palette. Keep these side-effectful and UI-aware so UI components stay lean.
+//
+// All IPC goes through `window.api.*` (installed by electron-api-shim.ts),
+// which is dual-mode: Tauri in production/dev, browser fallbacks in
+// zenlink/manual-browser testing. Do NOT import from lib/ipc.ts here — it
+// calls Tauri invoke directly and would bypass browser mode.
 
-import { fileApi, recentApi, bytesToUint8Array } from './ipc'
 import { useTabStore } from '../stores/tabStore'
 import { useFormatStore } from '../stores/formatStore'
 import { detectFormat } from '../types/tabs'
 import { getHandler, getHandlerForExtension } from '../formats/registry'
 
 export async function openFile(): Promise<void> {
-  const loaded = await fileApi.open()
+  const loaded = await window.api.file.open()
   if (!loaded) return
-  await openLoadedFile(loaded.path, loaded.name, bytesToUint8Array(loaded.bytes))
+  const name = loaded.path.split(/[/\\]/).pop() ?? loaded.path
+  await openLoadedFile(loaded.path, name, loaded.bytes)
 }
 
 // Open a file from a known path. If bytes are passed, skip the disk read —
@@ -22,8 +27,9 @@ export async function openFromPath(path: string, preloadedBytes?: Uint8Array): P
     await openLoadedFile(path, name, preloadedBytes)
     return
   }
-  const loaded = await fileApi.openPath(path)
-  await openLoadedFile(loaded.path, loaded.name, bytesToUint8Array(loaded.bytes))
+  const loaded = await window.api.file.openPath(path)
+  const name = loaded.path.split(/[/\\]/).pop() ?? loaded.path
+  await openLoadedFile(loaded.path, name, loaded.bytes)
 }
 
 async function openLoadedFile(path: string, name: string, bytes: Uint8Array): Promise<void> {
@@ -41,7 +47,7 @@ async function openLoadedFile(path: string, name: string, bytes: Uint8Array): Pr
   const tabId = useTabStore.getState().openTab(path, name, format)
   await handler.load(tabId, bytes, path)
   try {
-    await recentApi.add(path, name, format)
+    await window.api.recent.add(path, name, format)
   } catch (err) {
     console.warn('[recent] add failed', err)
   }
@@ -57,7 +63,7 @@ export async function saveActiveTab(): Promise<void> {
 
   const bytes = await handler.save(activeTabId)
   if (tab.filePath) {
-    await fileApi.save(tab.filePath, bytes)
+    await window.api.file.save(bytes, tab.filePath)
     setTabDirty(activeTabId, false)
   } else {
     await saveActiveTabAs()
@@ -73,14 +79,14 @@ export async function saveActiveTabAs(): Promise<void> {
   if (!handler) return
 
   const bytes = await handler.save(activeTabId)
-  const newPath = await fileApi.saveAs(bytes, tab.fileName)
+  const newPath = await window.api.file.saveAs(bytes)
   if (!newPath) return
 
   const newName = newPath.split(/[/\\]/).pop() ?? tab.fileName
   setTabFilePath(activeTabId, newPath, newName)
   setTabDirty(activeTabId, false)
   try {
-    await recentApi.add(newPath, newName, tab.format)
+    await window.api.recent.add(newPath, newName, tab.format)
   } catch (err) {
     console.warn('[recent] add failed', err)
   }
@@ -96,7 +102,7 @@ export async function saveTabById(tabId: string): Promise<void> {
   if (!handler) return
   const bytes = await handler.save(tabId)
   if (tab.filePath) {
-    await fileApi.save(tab.filePath, bytes)
+    await window.api.file.save(bytes, tab.filePath)
     setTabDirty(tabId, false)
   }
 }

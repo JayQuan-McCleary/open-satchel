@@ -153,6 +153,7 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
               // Pass sampled color through so drawText uses the right
               // ink — white on dark headers, black on body text.
               color: para.color,
+              backgroundColor: para.backgroundColor,
               itemIndices: [...para.itemIndices],
               itemOriginalTexts,
             },
