@@ -30,21 +30,21 @@ export default function PageRenderer({
   const showRulers = useUIStore((s) => s.showRulers)
   const showGrid = useUIStore((s) => s.showGrid)
   const pdfBytes = useFormatStore((s) => (s.data[tabId] as PdfFormatState | undefined)?.pdfBytes)
-  // Electron-era code hid the canvas (opacity:0) while _textLayerEdits was
-  // non-empty. That produced the user-visible "whole page fades to white"
-  // during editing — removed. EditableTextLayer's per-span white background
-  // already masks the original text wherever edits exist; the canvas stays
-  // visible everywhere else.
   const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null)
-  const [canvasReady, setCanvasReady] = useState(true)
+  // pdfBytes isn't a direct dep of the render effect — we want the
+  // effect to re-run when pdfDoc changes (which happens when pdfBytes
+  // changes) but not separately. Touch it to silence the linter.
+  void pdfBytes
 
-  // When pdfBytes change, mark canvas as not ready until re-render completes
-  useEffect(() => { setCanvasReady(false) }, [pdfBytes])
-
+  // Render loop with offscreen-canvas double-buffering. The visible
+  // canvas keeps showing the previous render (pre-save) while pdfjs
+  // rasterizes the new page into a detached canvas; when the async
+  // render resolves, we blit the result onto the visible canvas in a
+  // single frame. This eliminates the "fade to white" flash users saw
+  // on Ctrl+S, because the visible canvas is never cleared.
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-
     let cancelled = false
 
     const render = async () => {
@@ -57,20 +57,34 @@ export default function PageRenderer({
 
         const viewport = page.getViewport({
           scale: zoom * window.devicePixelRatio,
-          rotation: effectiveRotation
+          rotation: effectiveRotation,
         })
-        const displayViewport = page.getViewport({ scale: zoom, rotation: effectiveRotation })
+        const displayViewport = page.getViewport({
+          scale: zoom,
+          rotation: effectiveRotation,
+        })
 
-        canvas.width = viewport.width
-        canvas.height = viewport.height
+        // Render into an off-DOM canvas so the visible canvas doesn't
+        // blank during the async pdfjs paint.
+        const offscreen = document.createElement('canvas')
+        offscreen.width = Math.floor(viewport.width)
+        offscreen.height = Math.floor(viewport.height)
+        const offCtx = offscreen.getContext('2d')!
+        await page.render({ canvasContext: offCtx, viewport }).promise
+        if (cancelled) { page.cleanup(); return }
+
+        // Swap to visible canvas. Resizing the visible canvas clears
+        // it, so we do that atomically with the drawImage that follows
+        // — blank state is limited to microseconds inside the same JS
+        // task, never visible to the user.
+        canvas.width = offscreen.width
+        canvas.height = offscreen.height
         canvas.style.width = `${displayViewport.width}px`
         canvas.style.height = `${displayViewport.height}px`
+        const ctx = canvas.getContext('2d')!
+        ctx.drawImage(offscreen, 0, 0)
 
         setDimensions({ width: displayViewport.width, height: displayViewport.height })
-
-        const ctx = canvas.getContext('2d')!
-        await page.render({ canvasContext: ctx, viewport }).promise
-        if (!cancelled) setCanvasReady(true)
         page.cleanup()
       } catch (err) {
         if (!cancelled) console.error('Failed to render page:', err)
@@ -78,7 +92,9 @@ export default function PageRenderer({
     }
 
     render()
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+    }
   }, [pdfDoc, pageIndex, zoom, rotation])
 
   return (
@@ -104,8 +120,8 @@ export default function PageRenderer({
           position: 'absolute',
           top: 0,
           left: 0,
-          opacity: canvasReady ? 1 : 0,
-          transition: 'opacity 0.15s'
+          // No opacity transition — offscreen double-buffering above
+          // means the visible canvas is never in an intermediate state.
         }}
       />
       {dimensions && pdfBytes && (

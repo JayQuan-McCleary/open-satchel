@@ -101,13 +101,27 @@ export async function applyParagraphEditsToBytes(
     const { x, width, height } = edit.bbox
 
     // 1. Whiteout: cover the original text with a white rect.
-    // Slightly oversize to catch antialiasing fringes.
-    const pad = Math.min(2, edit.fontSize * 0.15)
+    //
+    // Padding has to be generous because:
+    //   - pdfjs's `item.width` is the advance width, which doesn't always
+    //     cover final glyph bearings — so bbox.width underestimates,
+    //     leaving a sliver of original text exposed on the right.
+    //   - The original font's metrics can differ from our fallback's by
+    //     a few percent, which on a long line compounds into several px.
+    //
+    // We pad 25% of fontSize on the top/bottom (enough to catch
+    // antialiasing + descenders) and an extra 15% of width on the right
+    // (enough to catch pdfjs's width underestimate on long text runs).
+    // With pad at 2px we saw the "edit + tail of original" duplicate
+    // bug on invoice values like "2025-12-JQMBD" \u2192 "2025-12-JQBD2-JQMBD".
+    const padY = Math.max(3, edit.fontSize * 0.25)
+    const padX = Math.max(3, edit.fontSize * 0.25)
+    const widthBuffer = Math.max(6, width * 0.15)
     pdfPage.drawRectangle({
-      x: x - pad,
-      y: pdfY - pad,
-      width: width + pad * 2,
-      height: height + pad * 2,
+      x: x - padX,
+      y: pdfY - padY,
+      width: width + padX * 2 + widthBuffer,
+      height: height + padY * 2,
       color: rgb(1, 1, 1),
       opacity: 1,
     })

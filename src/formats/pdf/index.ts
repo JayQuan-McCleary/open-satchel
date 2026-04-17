@@ -79,6 +79,12 @@ export const pdfHandler: FormatHandler = {
       }
     })()
 
+    // Track which pages had paragraph edits so we can skip span-level
+    // edits there (the whiteout already covered that region, and
+    // serializeEditsToPdf's legacy internal path would otherwise
+    // double-apply).
+    const pagesWithParaEdits = new Set<number>()
+
     try {
       // 1a. Paragraph-level edits (new default, Acrobat-style)
       const fallback = (useUIStore.getState() as any).fallbackFontFamily as string | undefined
@@ -91,13 +97,13 @@ export const pdfHandler: FormatHandler = {
           paraEdits,
           { fallbackFont: (fallback as any) || 'Helvetica' },
         )
+        pagesWithParaEdits.add(page.pageIndex)
       }
 
-      // 1b. Span-level text edits (legacy fallback path). Safe to call
-      // after paragraph edits because whiteouts for paragraphs already
-      // cleared the overlapping content; leftover span edits, if any,
-      // target unrelated regions.
+      // 1b. Span-level text edits (legacy fallback path). Skip pages
+      // where paragraph edits already ran — those cover the same region.
       for (const page of state.pages) {
+        if (pagesWithParaEdits.has(page.pageIndex)) continue
         const edits = (page as any)._textLayerEdits as TextLayerEdit[] | undefined
         if (!edits || edits.length === 0) continue
         workingBytes = await applyTextEditsToBytes(
@@ -111,9 +117,20 @@ export const pdfHandler: FormatHandler = {
       if (pdfjsDocForWhiteout) await pdfjsDocForWhiteout.destroy()
     }
 
+    // Clear _textLayerEdits on pages we handled via paragraph edits so
+    // serializeEditsToPdf's internal legacy path doesn't re-apply them.
+    // (This mutates the `pages` array we pass down, not state; state
+    // clearing happens below after the save completes.)
+    const pagesForSerializer = state.pages.map((p) => {
+      if (!pagesWithParaEdits.has(p.pageIndex)) return p
+      const { _textLayerEdits, ...rest } = p as any
+      void _textLayerEdits
+      return rest
+    })
+
     // Second pass: Fabric objects, page rotations/deletions, header/footer,
     // encryption, everything else.
-    const outBytes = await serializeEditsToPdf(workingBytes, state.pages, zoom, {
+    const outBytes = await serializeEditsToPdf(workingBytes, pagesForSerializer, zoom, {
       encryption: state.encryption,
       headerFooter: state.headerFooter,
     })
