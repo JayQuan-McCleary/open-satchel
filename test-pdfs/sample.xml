@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root>
+  <name>Test Document</name>
+  <version>1.0</version>
+  <features>
+    <feature>json</feature>
+    <feature>yaml</feature>
+  </features>
+  <nested>
+    <key value="abc">value</key>
+  </nested>
+</root>

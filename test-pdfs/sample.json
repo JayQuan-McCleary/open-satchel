@@ -1,0 +1,11 @@
+{
+  "name": "Test Document",
+  "version": 1.0,
+  "features": ["json", "yaml", "toml"],
+  "nested": {
+    "key": "value",
+    "numbers": [1, 2, 3]
+  },
+  "active": true,
+  "count": null
+}

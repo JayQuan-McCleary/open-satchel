@@ -79,6 +79,13 @@ import * as pdfAccessibility from '../src/renderer/services/pdfAccessibility'
 import * as pdfAValidation from '../src/renderer/services/pdfAValidation'
 import { pixelDiffPages } from '../src/renderer/services/pdfCompare'
 import LayersPanel from '../src/renderer/components/editor/LayersPanel'
+// Format registry for testing new formats
+import { registerAllFormats } from '../src/renderer/formats/registerAll'
+import { getHandler, getHandlerForExtension } from '../src/renderer/formats/registry'
+import { detectFormat } from '../src/renderer/types/tabs'
+
+// Register all formats so they're available for testing
+registerAllFormats()
 
 // Expose all services + libs to the harness driver.
 Object.assign(window as unknown as Record<string, unknown>, {
@@ -106,6 +113,9 @@ Object.assign(window as unknown as Record<string, unknown>, {
   __pdfAccessibility: pdfAccessibility,
   __pdfAValidation: pdfAValidation,
   __pixelDiffPages: pixelDiffPages,
+  __getHandler: getHandler,
+  __getHandlerForExtension: getHandlerForExtension,
+  __detectFormat: detectFormat,
 })
 
 // Capture full console.error argument lists (React substitutes through %s

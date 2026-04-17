@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
+  <description>
+    <title-info>
+      <book-title>Sample Book</book-title>
+      <author><first-name>Test</first-name><last-name>Author</last-name></author>
+    </title-info>
+  </description>
+  <body>
+    <title><p>Chapter 1</p></title>
+    <p>This is the first paragraph of the book.</p>
+    <p>This is the <emphasis>second</emphasis> paragraph with emphasis.</p>
+    <subtitle><p>Section 1.1</p></subtitle>
+    <p>More text here.</p>
+  </body>
+</FictionBook>

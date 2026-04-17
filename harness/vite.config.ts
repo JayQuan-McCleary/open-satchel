@@ -20,4 +20,8 @@ export default defineConfig({
       '@renderer': resolve(__dirname, '../src/renderer'),
     },
   },
+  define: {
+    // Polyfill Node globals used by some npm packages (@iarna/toml etc.)
+    global: 'globalThis',
+  },
 })
