@@ -13,7 +13,15 @@ export async function openFile(): Promise<void> {
   await openLoadedFile(loaded.path, loaded.name, bytesToUint8Array(loaded.bytes))
 }
 
-export async function openFromPath(path: string): Promise<void> {
+// Open a file from a known path. If bytes are passed, skip the disk read —
+// callers that just produced the bytes (merge output, convert output) can
+// pass them directly to avoid a round-trip through the OS file cache.
+export async function openFromPath(path: string, preloadedBytes?: Uint8Array): Promise<void> {
+  if (preloadedBytes) {
+    const name = path.split(/[/\\]/).pop() ?? path
+    await openLoadedFile(path, name, preloadedBytes)
+    return
+  }
   const loaded = await fileApi.openPath(path)
   await openLoadedFile(loaded.path, loaded.name, bytesToUint8Array(loaded.bytes))
 }
@@ -75,6 +83,21 @@ export async function saveActiveTabAs(): Promise<void> {
     await recentApi.add(newPath, newName, tab.format)
   } catch (err) {
     console.warn('[recent] add failed', err)
+  }
+}
+
+// Save a specific tab by id. Used by useAutoSave and anywhere else that
+// needs to save a non-active tab (e.g. "save all").
+export async function saveTabById(tabId: string): Promise<void> {
+  const { tabs, setTabDirty } = useTabStore.getState()
+  const tab = tabs.find((t) => t.id === tabId)
+  if (!tab) return
+  const handler = getHandler(tab.format)
+  if (!handler) return
+  const bytes = await handler.save(tabId)
+  if (tab.filePath) {
+    await fileApi.save(tab.filePath, bytes)
+    setTabDirty(tabId, false)
   }
 }
 

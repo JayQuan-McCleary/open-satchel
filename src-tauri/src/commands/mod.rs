@@ -3,5 +3,6 @@
 
 pub mod app;
 pub mod file;
+pub mod font;
 pub mod pdf;
 pub mod recent;

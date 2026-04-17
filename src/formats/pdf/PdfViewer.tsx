@@ -1,111 +1,177 @@
-import { useEffect, useRef, useState } from 'react'
-import { useFormatStore } from '../../stores/formatStore'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import type { FormatViewerProps } from '../types'
+import { useFormatStore } from '../../stores/formatStore'
+import { useUIStore } from '../../stores/uiStore'
 import type { PdfFormatState } from './index'
+import PageRenderer from './PageRenderer'
+import PdfSearchBar from './PdfSearchBar'
+import { usePdfDocument } from '../../components/viewer/usePdfDocument'
+import { useViewerFeatures, installAutoScroll, EYE_PROTECTION_FILTER } from '../../services/viewerFeatures'
+import LayersPanel from '../../components/editor/LayersPanel'
 
-// M1 viewer: render all pages stacked vertically, fixed scale. No editing
-// layer, no text selection, no thumbnail click-scroll (that's the sidebar's
-// job). Goal here is to prove the IPC + pdfjs pipeline end-to-end.
+// NOTE: The prior tool-switch text-edit batch apply was removed. Edits now
+// apply live per keystroke inside EditableTextLayer (see
+// services/pdfTextEdits.ts + EditableTextLayer.tsx). This prevents the
+// "everything reverts on Select" UX hazard and removes the white-fade
+// visual on focused spans.
+
 export default function PdfViewer({ tabId }: FormatViewerProps) {
-  const state = useFormatStore(
-    (s) => s.data[tabId] as PdfFormatState | undefined,
-  )
-  const containerRef = useRef<HTMLDivElement | null>(null)
-  const [renderError, setRenderError] = useState<string | null>(null)
+  const state = useFormatStore((s) => s.data[tabId] as PdfFormatState | undefined)
+  const tool = useUIStore((s) => s.tool)
+  const setCurrentPage = useUIStore((s) => s.setCurrentPage)
+  const searchVisible = useUIStore((s) => s.searchVisible)
+  const setSearchVisible = useUIStore((s) => s.setSearchVisible)
+  const showLayers = useUIStore((s) => s.showLayers)
+  const currentPage = useUIStore((s) => s.currentPage)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const pdfDoc = usePdfDocument(state?.pdfBytes ?? null)
+  const [searchMatches, setSearchMatches] = useState(0)
+  const [fabricCanvas, setFabricCanvas] = useState<unknown>(null)
+
+  // Poll for the current page's fabric canvas when layers panel is open
+  useEffect(() => {
+    if (!showLayers) { setFabricCanvas(null); return }
+    let cancelled = false
+    const poll = () => {
+      if (cancelled) return
+      const els = [...document.querySelectorAll('canvas.lower-canvas')] as Element[]
+      for (const el of els) {
+        const fiberKey = Object.keys(el).find((k) => k.startsWith('__reactFiber'))
+        if (!fiberKey) continue
+        let fiber: any = (el as any)[fiberKey]
+        while (fiber) {
+          let hook = fiber.memoizedState
+          while (hook) {
+            const val = hook.memoizedState
+            if (val && typeof val === 'object' && 'current' in val) {
+              const cur = val.current
+              if (cur && typeof cur.add === 'function' && typeof cur.toJSON === 'function' && cur.width > 400) {
+                setFabricCanvas(cur)
+                return
+              }
+            }
+            hook = hook.next
+          }
+          fiber = fiber.return
+        }
+      }
+      setTimeout(poll, 200)
+    }
+    poll()
+    return () => { cancelled = true }
+  }, [showLayers, currentPage])
+
+  // Viewer feature flags (eye protection, auto-scroll, hide annotations)
+  const eyeProtection = useViewerFeatures((s) => s.eyeProtection)
+  const autoScroll = useViewerFeatures((s) => s.autoScroll)
+  const autoScrollSpeed = useViewerFeatures((s) => s.autoScrollSpeed)
+  const hideAnnotations = useViewerFeatures((s) => s.hideAnnotations)
+
+  // Install / cancel auto-scroll interval on the viewport container
+  useEffect(() => {
+    installAutoScroll(containerRef.current, autoScrollSpeed, autoScroll)
+    return () => installAutoScroll(null, 0, false)
+  }, [autoScroll, autoScrollSpeed])
+
+  // Toggle a class on the container so a stylesheet rule can hide the
+  // fabric upper-canvas layer (annotations) without unmounting it.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    el.classList.toggle('satchel-hide-annotations', hideAnnotations)
+  }, [hideAnnotations])
+
+  const visiblePages = state?.pages.filter((p) => !p.deleted) ?? []
 
   useEffect(() => {
-    if (!state?.doc || !containerRef.current) return
     const container = containerRef.current
-    container.innerHTML = ''
-    setRenderError(null)
-
-    // Render synchronously-sequentially so large PDFs stream in rather
-    // than spiking all at once.
-    let cancelled = false
-    const doc = state.doc as {
-      numPages: number
-      getPage: (n: number) => Promise<{
-        getViewport: (o: { scale: number }) => { width: number; height: number }
-        render: (o: { canvasContext: CanvasRenderingContext2D; viewport: unknown }) => { promise: Promise<void> }
-      }>
-    }
-
-    ;(async () => {
-      try {
-        for (let i = 1; i <= doc.numPages; i++) {
-          if (cancelled) return
-          const page = await doc.getPage(i)
-          const viewport = page.getViewport({ scale: state.scale })
-          const canvas = document.createElement('canvas')
-          canvas.width = Math.floor(viewport.width)
-          canvas.height = Math.floor(viewport.height)
-          canvas.style.display = 'block'
-          canvas.style.margin = '12px auto'
-          canvas.style.boxShadow = '0 4px 12px rgba(0,0,0,0.4)'
-          canvas.style.background = 'white'
-          canvas.setAttribute('data-page', String(i))
-
-          const wrap = document.createElement('div')
-          wrap.style.position = 'relative'
-          wrap.appendChild(canvas)
-          container.appendChild(wrap)
-
-          const ctx = canvas.getContext('2d')
-          if (!ctx) continue
-          await page.render({ canvasContext: ctx, viewport }).promise
+    if (!container) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            const idx = Number((entry.target as HTMLElement).dataset.pageDisplayIndex)
+            if (!isNaN(idx)) setCurrentPage(idx)
+          }
         }
-      } catch (err) {
-        if (!cancelled) setRenderError(err instanceof Error ? err.message : String(err))
+      },
+      { root: container, threshold: 0.5 }
+    )
+    const pageEls = container.querySelectorAll('[data-page-display-index]')
+    pageEls.forEach((el) => observer.observe(el))
+    return () => observer.disconnect()
+  }, [visiblePages.length, setCurrentPage])
+
+  // Ctrl+F to toggle search
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault()
+        useUIStore.getState().toggleSearch()
       }
-    })()
-
-    return () => {
-      cancelled = true
     }
-  }, [state?.doc, state?.scale])
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
 
-  if (!state) {
+  const handleSearch = useCallback(async (query: string, _matchIndex: number) => {
+    if (!pdfDoc || query.length < 2) { setSearchMatches(0); return }
+    let total = 0
+    for (let i = 1; i <= pdfDoc.numPages; i++) {
+      const page = await pdfDoc.getPage(i)
+      const textContent = await page.getTextContent()
+      const text = textContent.items.map((item: any) => item.str).join(' ')
+      const regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+      const matches = text.match(regex)
+      if (matches) total += matches.length
+      page.cleanup()
+    }
+    setSearchMatches(total)
+  }, [pdfDoc])
+
+  if (!pdfDoc || !state) {
     return (
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          height: '100%',
-          color: 'var(--text-muted)',
-          fontSize: 12,
-        }}
-      >
-        Loading PDF…
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)' }}>
+        Loading PDF...
       </div>
     )
   }
 
   return (
-    <div
-      style={{
-        height: '100%',
-        overflow: 'auto',
-        background: 'var(--bg-secondary)',
-        position: 'relative',
-      }}
-    >
-      {renderError && (
+    <div style={{ display: 'flex', height: '100%', width: '100%' }}>
+      <div style={{ position: 'relative', flex: 1, minWidth: 0, overflow: 'hidden' }}>
+        <PdfSearchBar
+          visible={searchVisible}
+          onClose={() => setSearchVisible(false)}
+          onSearch={handleSearch}
+          totalMatches={searchMatches}
+        />
         <div
+          ref={containerRef}
+          data-testid="pdf-viewer-scroll"
           style={{
-            margin: 16,
-            padding: 12,
-            background: 'rgba(239,68,68,0.15)',
-            border: '1px solid var(--danger)',
-            color: 'var(--danger)',
-            fontSize: 12,
-            borderRadius: 6,
+            overflow: 'auto', height: '100%', width: '100%',
+            display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '20px 0',
+            filter: eyeProtection ? EYE_PROTECTION_FILTER : undefined,
           }}
         >
-          Render error: {renderError}
+          {visiblePages.map((page, displayIndex) => (
+            <PageRenderer
+              key={page.pageIndex}
+              tabId={tabId}
+              pdfDoc={pdfDoc}
+              pageIndex={page.pageIndex}
+              displayIndex={displayIndex}
+              rotation={page.rotation}
+            />
+          ))}
+        </div>
+      </div>
+      {showLayers && (
+        <div style={{ width: 220, flexShrink: 0, borderLeft: '1px solid var(--border)', overflow: 'auto', background: 'var(--bg-primary)', padding: 6 }}>
+          <LayersPanel fabricCanvas={fabricCanvas as Parameters<typeof LayersPanel>[0]['fabricCanvas']} />
         </div>
       )}
-      <div ref={containerRef} className="pdfjs-container" />
     </div>
   )
 }

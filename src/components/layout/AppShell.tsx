@@ -23,7 +23,10 @@ export default function AppShell() {
       style={{
         display: 'grid',
         gridTemplateRows: hasRibbon
-          ? 'var(--toolbar-height) var(--tabbar-height) var(--ribbon-height) 1fr var(--statusbar-height)'
+          // minmax(ribbon, auto) lets the ribbon grow to fit wrapped groups
+          // without clipping, while keeping the default min-height so it
+          // never collapses to 0 when the active tab has no ribbon content.
+          ? `var(--toolbar-height) var(--tabbar-height) minmax(var(--ribbon-height), auto) 1fr var(--statusbar-height)`
           : 'var(--toolbar-height) var(--tabbar-height) 1fr var(--statusbar-height)',
         gridTemplateColumns: hasSidebar ? 'var(--sidebar-width) 1fr' : '1fr',
         height: '100vh',

@@ -27,6 +27,11 @@ thiserror = "1"
 dirs = "5"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
+# Font subsystem — pure-Rust ttf/otf parsing + walkdir for font scans.
+# No native C deps, keeps the Windows build clean.
+ttf-parser = "0.25"
+walkdir = "2"
+uuid = { version = "1", features = ["v4"] }
 
 # Release profile: maximum optimization, strip debug, LTO.
 # Matters for perf-vs-Electron story we promised the user.

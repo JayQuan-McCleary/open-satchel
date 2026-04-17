@@ -29,9 +29,9 @@ export function registerGlobalShortcuts(): () => void {
     // Ctrl+B: toggle sidebar
     if (matches(e, { ctrl: true, key: 'b' })) { e.preventDefault(); useUIStore.getState().toggleSidebar(); return }
     // Ctrl+F: find
-    if (matches(e, { ctrl: true, key: 'f' })) { e.preventDefault(); useUIStore.getState().openFindReplace('find'); return }
+    if (matches(e, { ctrl: true, key: 'f' })) { e.preventDefault(); useUIStore.getState().openFind(); return }
     // Ctrl+H: find & replace
-    if (matches(e, { ctrl: true, key: 'h' })) { e.preventDefault(); useUIStore.getState().openFindReplace('replace'); return }
+    if (matches(e, { ctrl: true, key: 'h' })) { e.preventDefault(); useUIStore.getState().openReplace(); return }
     // Ctrl+K: command palette
     if (matches(e, { ctrl: true, key: 'k' })) { e.preventDefault(); useUIStore.getState().setCommandPaletteOpen(true); return }
     // Ctrl+Tab: next tab

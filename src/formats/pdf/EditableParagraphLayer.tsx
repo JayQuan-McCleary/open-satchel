@@ -1,0 +1,278 @@
+// EditableParagraphLayer — Acrobat-style paragraph-level editing.
+//
+// This is the inline text editor we land on after learning that span-level
+// (per-TJ-element) editing causes visual flicker and produces fragmented
+// edits. Acrobat, Foxit, and WPS all work at the paragraph level with
+// visible bounding boxes. This component does the same:
+//
+//   1. Cluster pdfjs text items into paragraph boxes at mount
+//   2. Draw a thin outline over each paragraph
+//   3. On click, the clicked paragraph becomes a contenteditable div
+//      sized to the bbox. Browser reflow handles wrapping while typing.
+//   4. On blur or on every input, store the diff in `_paragraphEdits`
+//      on the page state — no canvas repaint during editing
+//   5. On save, pdfHandler.save whiteouts the bbox and draws the new
+//      text in its place via applyParagraphEditsToBytes
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { PDFDocumentProxy } from 'pdfjs-dist'
+import { useFormatStore } from '../../stores/formatStore'
+import { useTabStore } from '../../stores/tabStore'
+import { clusterParagraphs, type ParagraphBox } from '../../services/pdfParagraphs'
+import type { ParagraphEdit } from '../../services/pdfParagraphEdits'
+import type { PdfFormatState } from './index'
+
+interface Props {
+  tabId: string
+  pageIndex: number
+  pdfDoc: PDFDocumentProxy
+  /** Displayed canvas width in CSS pixels. */
+  width: number
+  /** Displayed canvas height in CSS pixels. */
+  height: number
+}
+
+// pdfjs fontName is an internal id like 'g_d0_f1'; not useful for the
+// browser. Until we have full embedded-font extraction (M2+), use a
+// close-matching web font. Helvetica is the most-common default.
+const EDIT_FONT_STACK = `-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif`
+
+function readPendingEditsForPage(tabId: string, pageIndex: number): ParagraphEdit[] {
+  const state = useFormatStore.getState().data[tabId] as PdfFormatState | undefined
+  if (!state) return []
+  const page = state.pages.find((p) => p.pageIndex === pageIndex) as
+    | (PdfFormatState['pages'][number] & { _paragraphEdits?: ParagraphEdit[] })
+    | undefined
+  return page?._paragraphEdits ?? []
+}
+
+function writePendingEditsForPage(tabId: string, pageIndex: number, edits: ParagraphEdit[]) {
+  useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({
+    ...prev,
+    pages: prev.pages.map((p) =>
+      p.pageIndex === pageIndex
+        ? ({ ...p, _paragraphEdits: edits.length > 0 ? edits : undefined } as any)
+        : p,
+    ),
+  }))
+  // Mark dirty iff any page has pending edits.
+  const anyDirty = useFormatStore
+    .getState()
+    .data[tabId] != null
+  if (edits.length > 0) useTabStore.getState().setTabDirty(tabId, true)
+  // If we just cleared the last edit, leave the dirty flag alone —
+  // other edit systems (Fabric, page rotates) might still be dirty.
+  void anyDirty
+}
+
+export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width, height }: Props) {
+  const [paragraphs, setParagraphs] = useState<ParagraphBox[]>([])
+  const [basePageSize, setBasePageSize] = useState<{ w: number; h: number } | null>(null)
+  const [activeId, setActiveId] = useState<string | null>(null)
+
+  // Cluster paragraphs once per (pdfDoc, pageIndex). Re-runs if pdfBytes
+  // change because pdfDoc identity then changes.
+  useEffect(() => {
+    let cancelled = false
+    clusterParagraphs(pdfDoc, pageIndex)
+      .then((res) => {
+        if (cancelled) return
+        setParagraphs(res.paragraphs)
+        setBasePageSize({ w: res.pageWidth, h: res.pageHeight })
+      })
+      .catch((err) => {
+        console.error('[EditableParagraphLayer] cluster failed:', err)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [pdfDoc, pageIndex])
+
+  // CSS-pixels per PDF-user-space-unit. pdfjs returns geometry at scale=1,
+  // the canvas is rendered at zoom — we scale the overlay to match.
+  const scale = basePageSize ? width / basePageSize.w : 1
+
+  // Snapshot of pending edits so React renders the pre-typed text when a
+  // box is re-mounted (e.g. after tool toggle or tab switch).
+  const pendingById = useMemo(() => {
+    const edits = readPendingEditsForPage(tabId, pageIndex)
+    return new Map(edits.map((e) => [e.paragraphId, e]))
+    // Depends on the store data so selectors and re-render correctly.
+    // Reading through getState() avoids subscribing to the full data map.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabId, pageIndex, paragraphs.length])
+
+  const commitEdit = useCallback(
+    (para: ParagraphBox, newText: string) => {
+      const existing = readPendingEditsForPage(tabId, pageIndex)
+      const without = existing.filter((e) => e.paragraphId !== para.id)
+      const isNoop = newText === para.originalText
+      const next: ParagraphEdit[] = isNoop
+        ? without
+        : [
+            ...without,
+            {
+              paragraphId: para.id,
+              bbox: para.bbox,
+              originalText: para.originalText,
+              newText,
+              fontSize: para.fontSize,
+            },
+          ]
+      writePendingEditsForPage(tabId, pageIndex, next)
+    },
+    [tabId, pageIndex],
+  )
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        width,
+        height,
+        zIndex: 5,
+        pointerEvents: 'none', // container itself is transparent; boxes enable pointer events
+      }}
+      data-testid="editable-paragraph-layer"
+    >
+      {paragraphs.map((p) => {
+        const pending = pendingById.get(p.id)
+        const text = pending?.newText ?? p.originalText
+        return (
+          <ParagraphEditor
+            key={p.id}
+            paragraph={p}
+            scale={scale}
+            active={activeId === p.id}
+            isEdited={!!pending}
+            initialText={text}
+            onActivate={() => setActiveId(p.id)}
+            onDeactivate={() => setActiveId(null)}
+            onCommit={(newText) => commitEdit(p, newText)}
+          />
+        )
+      })}
+    </div>
+  )
+}
+
+interface ParagraphEditorProps {
+  paragraph: ParagraphBox
+  scale: number
+  active: boolean
+  isEdited: boolean
+  initialText: string
+  onActivate: () => void
+  onDeactivate: () => void
+  onCommit: (newText: string) => void
+}
+
+function ParagraphEditor({
+  paragraph,
+  scale,
+  active,
+  isEdited,
+  initialText,
+  onActivate,
+  onDeactivate,
+  onCommit,
+}: ParagraphEditorProps) {
+  const divRef = useRef<HTMLDivElement>(null)
+  // Shadow state so we don't rewrite the div on every commit (would reset
+  // caret). We only seed it when (paragraph,initialText) changes.
+  const seededRef = useRef<string>('')
+
+  useEffect(() => {
+    const el = divRef.current
+    if (!el) return
+    if (seededRef.current !== initialText) {
+      el.textContent = initialText
+      seededRef.current = initialText
+    }
+  }, [initialText])
+
+  const left = paragraph.bbox.x * scale
+  const top = paragraph.bbox.y * scale
+  const boxW = paragraph.bbox.width * scale
+  const boxH = paragraph.bbox.height * scale
+  const displayFontSize = Math.max(6, paragraph.fontSize * scale)
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        left,
+        top,
+        width: boxW,
+        minHeight: boxH,
+        pointerEvents: 'auto',
+        cursor: active ? 'text' : 'pointer',
+        // Thin outline always visible in edit mode — Acrobat-style
+        // bounding-box affordance. Active box gets a solid accent outline;
+        // edited boxes get a distinctive color so the user can see what's
+        // been changed but not yet saved.
+        outline: active
+          ? '2px solid #89b4fa'
+          : isEdited
+            ? '1px solid #f59e0b'
+            : '1px dashed rgba(137,180,250,0.5)',
+        outlineOffset: 0,
+        // Near-opaque white when editing so the canvas text beneath
+        // doesn't bleed through visibly while typing. When not active,
+        // transparent so the original rendered text remains the source
+        // of truth for anything we haven't edited yet.
+        background: active
+          ? 'rgba(255,255,255,0.97)'
+          : isEdited
+            ? 'rgba(255,255,255,0.97)'
+            : 'transparent',
+        color: active || isEdited ? '#000' : 'transparent',
+        caretColor: '#000',
+        fontFamily: EDIT_FONT_STACK,
+        fontSize: displayFontSize,
+        lineHeight: 1.2,
+        padding: 0,
+        overflow: 'hidden',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+      }}
+      onClick={() => {
+        if (!active) {
+          onActivate()
+          // Defer focus so the browser applies contentEditable before
+          // .focus(); otherwise caret placement is flaky.
+          requestAnimationFrame(() => {
+            divRef.current?.focus()
+          })
+        }
+      }}
+      onBlur={(e) => {
+        const newText = e.currentTarget.textContent ?? ''
+        onCommit(newText)
+        onDeactivate()
+      }}
+      onInput={(e) => {
+        // Commit on every input so state is always up to date. We skip
+        // rewriting div contents on commit (seededRef guard above), so
+        // the caret doesn't jump.
+        const newText = (e.currentTarget as HTMLDivElement).textContent ?? ''
+        onCommit(newText)
+      }}
+      onKeyDown={(e) => {
+        // Escape: cancel back to original text, blur.
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          if (divRef.current) divRef.current.textContent = paragraph.originalText
+          onCommit(paragraph.originalText)
+          divRef.current?.blur()
+        }
+      }}
+      contentEditable={active}
+      suppressContentEditableWarning
+      ref={divRef}
+      data-paragraph-id={paragraph.id}
+    />
+  )
+}

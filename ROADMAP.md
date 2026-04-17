@@ -75,6 +75,21 @@ Deliverable: Tauri 2 app that launches, opens a file dialog, loads a PDF, and re
 - [ ] PPTX: raw OOXML parse + LibreOffice sidecar for slide rendering
 - [ ] Bundling strategy for LibreOffice (portable detect: %USERPROFILE%\.open-satchel\libreoffice or bundled)
 
+## M3.5 — Paragraph editor polish (from live-user feedback)
+
+- [ ] **Linked paragraph blocks** — Shift-click two or more paragraph bboxes
+  to chain them; typing in one reflows across the chain (Foxit's
+  differentiator, the feature Acrobat users wish Acrobat had). Requires
+  a `ParagraphChain` model that tracks ordered membership + a custom
+  text-flow algorithm that spills overflow into the next bbox.
+- [ ] Font-aware paragraph editing — prefer the original embedded font
+  when available via `font.scanPdf` + `font.getBytes`. Falls back to
+  user-picked system font otherwise.
+- [ ] Font subsetting at save time — a pure-Rust subset-font equivalent
+  (currently pass-through, so imported fonts embed as full files).
+- [ ] Box resize handles on active paragraph — Acrobat-style circular
+  grips at corners + edge midpoints.
+
 ## M7 — Cross-cutting multiplier features
 
 - [ ] Full-text search across all open tabs (via Tantivy index keyed on tabId)

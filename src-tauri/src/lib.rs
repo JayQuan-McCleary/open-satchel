@@ -32,6 +32,13 @@ pub fn run() {
             commands::pdf::pdf_page_count,
             commands::pdf::pdf_render_page,
             commands::pdf::pdf_extract_text,
+            // --- font subsystem (M2) ---
+            commands::font::font_list_system,
+            commands::font::font_get_bytes,
+            commands::font::font_imported_list,
+            commands::font::font_import_file,
+            commands::font::font_imported_remove,
+            commands::font::font_scan_pdf,
             // --- app ---
             commands::app::app_version,
         ])
