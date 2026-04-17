@@ -156,31 +156,23 @@ export async function applyParagraphEditsToBytes(
     const pdfY = pageHeight - edit.bbox.y - edit.bbox.height
     const { x, width, height } = edit.bbox
 
-    // 1. Whiteout: cover the original text with a white rect.
+    // NOTE: prior versions drew a big white rect here as a whiteout.
+    // That ran BEFORE we had content-stream blanking (the step 1 above
+    // via applyTextEditsToBytes), so painting white was the only way to
+    // hide the original glyphs.
     //
-    // Padding has to be generous because:
-    //   - pdfjs's `item.width` is the advance width, which doesn't always
-    //     cover final glyph bearings — so bbox.width underestimates,
-    //     leaving a sliver of original text exposed on the right.
-    //   - The original font's metrics can differ from our fallback's by
-    //     a few percent, which on a long line compounds into several px.
+    // Now that step 1 actually removes the operators, the whiteout is
+    // redundant — and worse, it broke dark-background paragraphs by
+    // painting a white rectangle on top of e.g. the black invoice
+    // header bar (see screenshot from live testing: editing "Invoice"
+    // turned the whole header into a white strip).
     //
-    // We pad 25% of fontSize on the top/bottom (enough to catch
-    // antialiasing + descenders) and an extra 15% of width on the right
-    // (enough to catch pdfjs's width underestimate on long text runs).
-    // With pad at 2px we saw the "edit + tail of original" duplicate
-    // bug on invoice values like "2025-12-JQMBD" \u2192 "2025-12-JQBD2-JQMBD".
-    const padY = Math.max(3, edit.fontSize * 0.25)
-    const padX = Math.max(3, edit.fontSize * 0.25)
-    const widthBuffer = Math.max(6, width * 0.15)
-    pdfPage.drawRectangle({
-      x: x - padX,
-      y: pdfY - padY,
-      width: width + padX * 2 + widthBuffer,
-      height: height + padY * 2,
-      color: rgb(1, 1, 1),
-      opacity: 1,
-    })
+    // For CMap-encoded runs, applyTextEditsToBytes already draws
+    // targeted per-item whiteouts inside itself — small rects on each
+    // glyph run, not a fat paragraph-sized rect. That's tight enough to
+    // not damage surrounding layout.
+    //
+    // TL;DR: we rely on step 1 to erase, and only redraw text here.
 
     // 2. Draw new text inside the bbox.
     if (edit.newText.trim()) {

@@ -18,7 +18,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { useFormatStore } from '../../stores/formatStore'
 import { useTabStore } from '../../stores/tabStore'
-import { clusterParagraphs, type ParagraphBox, type TextItem } from '../../services/pdfParagraphs'
+import {
+  clusterParagraphs,
+  sampleParagraphColors,
+  type ParagraphBox,
+  type TextItem,
+} from '../../services/pdfParagraphs'
 import type { ParagraphEdit } from '../../services/pdfParagraphEdits'
 import type { PdfFormatState } from './index'
 
@@ -69,6 +74,7 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
   const [paragraphs, setParagraphs] = useState<ParagraphBox[]>([])
   const [basePageSize, setBasePageSize] = useState<{ w: number; h: number } | null>(null)
   const [activeId, setActiveId] = useState<string | null>(null)
+  const layerRef = useRef<HTMLDivElement>(null)
 
   // Cluster paragraphs once per (pdfDoc, pageIndex). Re-runs if pdfBytes
   // change because pdfDoc identity then changes.
@@ -77,7 +83,19 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
     clusterParagraphs(pdfDoc, pageIndex)
       .then((res) => {
         if (cancelled) return
-        setParagraphs(res.paragraphs)
+
+        // Once clustering is done, walk up to the sibling <canvas> on
+        // the PageRenderer and sample the rendered pixels so we can
+        // infer each paragraph's text color (white on dark header vs
+        // black on light body). Without this, every edit defaults to
+        // black and invisibly vanishes on dark-bg paragraphs.
+        let finalParagraphs = res.paragraphs
+        const layer = layerRef.current
+        const sibling = layer?.parentElement?.querySelector('canvas') as HTMLCanvasElement | null
+        if (sibling && sibling.width > 0) {
+          finalParagraphs = sampleParagraphColors(sibling, res.paragraphs, res.pageWidth)
+        }
+        setParagraphs(finalParagraphs)
         setBasePageSize({ w: res.pageWidth, h: res.pageHeight })
       })
       .catch((err) => {
@@ -132,6 +150,9 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
               originalText: para.originalText,
               newText,
               fontSize: para.fontSize,
+              // Pass sampled color through so drawText uses the right
+              // ink — white on dark headers, black on body text.
+              color: para.color,
               itemIndices: [...para.itemIndices],
               itemOriginalTexts,
             },
@@ -143,6 +164,7 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
 
   return (
     <div
+      ref={layerRef}
       style={{
         position: 'absolute',
         top: 0,
@@ -238,17 +260,18 @@ function ParagraphEditor({
             ? '1px solid #f59e0b'
             : '1px dashed rgba(137,180,250,0.5)',
         outlineOffset: 0,
-        // Near-opaque white when editing so the canvas text beneath
-        // doesn't bleed through visibly while typing. When not active,
-        // transparent so the original rendered text remains the source
-        // of truth for anything we haven't edited yet.
-        background: active
-          ? 'rgba(255,255,255,0.97)'
-          : isEdited
-            ? 'rgba(255,255,255,0.97)'
-            : 'transparent',
-        color: active || isEdited ? '#000' : 'transparent',
-        caretColor: '#000',
+        // When editing, mask the canvas beneath so the caret + typed
+        // text are clearly visible. For dark-background paragraphs we
+        // flip to a dark mask + light text; otherwise light mask +
+        // dark text. This matches the saved PDF's color scheme — what
+        // you see while editing is what you get after save.
+        background: active || isEdited
+          ? paragraph.onDarkBackground
+            ? 'rgba(15,17,21,0.97)'
+            : 'rgba(255,255,255,0.97)'
+          : 'transparent',
+        color: active || isEdited ? paragraph.color : 'transparent',
+        caretColor: paragraph.color,
         // Match the paragraph's original styling as closely as the
         // pdfjs metadata allows. Users can see if their edit is
         // "reading" right before they save.
