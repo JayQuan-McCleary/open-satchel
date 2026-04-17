@@ -400,17 +400,30 @@ export async function clusterParagraphs(
     }
     const fontName = mostCommon(fontNames)
     const style = styles[fontName] ?? {}
+    const medFontSize = median(fontSizes)
+    // Bold detection: pdfjs's internal fontName ('g_d0_f1' etc.) almost
+    // never contains 'bold', so the isBoldName(fontName) check rarely
+    // fires on real PDFs. Fall back to three signals:
+    //   1. Resolved fontFamily from the styles map (e.g. 'Helvetica-Bold')
+    //   2. fontName containing 'bold'/'black'/'heavy' (covers some PDFs)
+    //   3. Large font size as a weak heading heuristic — titles/headers
+    //      are almost always bold in designed documents.
+    const resolvedFamily = style.fontFamily ?? ''
+    const bold =
+      isBoldName(fontName) ||
+      isBoldName(resolvedFamily) ||
+      medFontSize >= 20
     paragraphs.push({
       id: `p_${pageIndex}_${Math.round(minX)}_${Math.round(minY)}`,
       itemIndices,
       lines: allLines,
       bbox: { x: minX, y: minY, width: maxX - minX, height: maxY - minY },
       originalText: texts.join('\n'),
-      fontSize: median(fontSizes),
+      fontSize: medFontSize,
       fontName,
       fontFamily: normalizeFontFamily(style.fontFamily),
-      bold: isBoldName(fontName),
-      italic: isItalicName(fontName),
+      bold,
+      italic: isItalicName(fontName) || isItalicName(resolvedFamily),
       color: '#000000',
       onDarkBackground: false,
       backgroundColor: '#ffffff',

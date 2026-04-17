@@ -154,6 +154,8 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
               // ink — white on dark headers, black on body text.
               color: para.color,
               backgroundColor: para.backgroundColor,
+              bold: para.bold,
+              italic: para.italic,
               itemIndices: [...para.itemIndices],
               itemOriginalTexts,
             },

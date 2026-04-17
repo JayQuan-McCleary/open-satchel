@@ -42,11 +42,12 @@ export interface ParagraphEdit {
   /** Background color hex (sampled from canvas — used for the "whiteout"
    *  rect which is actually whatever-color-the-background-is to blend in). */
   backgroundColor?: string
-  /**
-   * pdfjs TextLayer indices of every item that belongs to this paragraph.
-   * Used at save time to blank those runs in the content stream so pdfjs
-   * doesn't extract ghost text on the next edit.
-   */
+  /** True when the original paragraph was bold/heading; save picks a
+   *  bold variant of the fallback font to preserve visual weight. */
+  bold?: boolean
+  /** True when the original paragraph was italic. */
+  italic?: boolean
+  /** pdfjs TextLayer indices of every item that belongs to this paragraph. */
   itemIndices?: number[]
   /** Original text for each item — same length as itemIndices. */
   itemOriginalTexts?: string[]
@@ -144,7 +145,32 @@ export async function applyParagraphEditsToBytes(
   const { height: pageHeight } = pdfPage.getSize()
 
   const fallbackName = options.fallbackFont ?? 'Helvetica'
-  const font = await doc.embedFont(StandardFonts[fallbackName])
+  // Pre-embed all four style variants so we can pick per-edit based on
+  // the paragraph's detected bold/italic flags. Only the requested
+  // variants actually get written into the output; pdf-lib lazy-
+  // serializes embedded fonts.
+  const fontPlain = await doc.embedFont(StandardFonts[fallbackName])
+  const fontBold = await doc.embedFont(
+    fallbackName === 'Helvetica' ? StandardFonts.HelveticaBold
+      : fallbackName === 'TimesRoman' ? StandardFonts.TimesRomanBold
+      : StandardFonts.CourierBold,
+  )
+  const fontItalic = await doc.embedFont(
+    fallbackName === 'Helvetica' ? StandardFonts.HelveticaOblique
+      : fallbackName === 'TimesRoman' ? StandardFonts.TimesRomanItalic
+      : StandardFonts.CourierOblique,
+  )
+  const fontBoldItalic = await doc.embedFont(
+    fallbackName === 'Helvetica' ? StandardFonts.HelveticaBoldOblique
+      : fallbackName === 'TimesRoman' ? StandardFonts.TimesRomanBoldItalic
+      : StandardFonts.CourierBoldOblique,
+  )
+  const pickFont = (bold: boolean, italic: boolean): PDFFont => {
+    if (bold && italic) return fontBoldItalic
+    if (bold) return fontBold
+    if (italic) return fontItalic
+    return fontPlain
+  }
 
   for (const edit of edits) {
     // Convert viewport top-left origin → pdf user-space bottom-left origin.
@@ -193,6 +219,7 @@ export async function applyParagraphEditsToBytes(
       // the baseline/line spacing stays consistent with the rest of the page.
       const size = Math.max(6, Math.min(edit.fontSize, 72))
       const lineHeight = size * 1.2
+      const font = pickFont(!!edit.bold, !!edit.italic)
       const lines = wrapLines(edit.newText, font, size, width)
 
       // Draw top-down. pdf-lib's y is the text baseline, so we start at
