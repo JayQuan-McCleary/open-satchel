@@ -1,0 +1,38 @@
+[package]
+name = "open-satchel"
+version = "0.1.0"
+description = "Free, local, no-paywall universal file editor"
+authors = ["JayQuan McCleary"]
+edition = "2021"
+rust-version = "1.77"
+
+# The `_lib` name is what Tauri's mobile/desktop entry points import.
+[lib]
+name = "open_satchel_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.1", features = [] }
+tauri-plugin-dialog = "2.0"
+tauri-plugin-fs = "2.0"
+tauri-plugin-shell = "2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+thiserror = "1"
+dirs = "5"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+
+# Release profile: maximum optimization, strip debug, LTO.
+# Matters for perf-vs-Electron story we promised the user.
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true
