@@ -113,10 +113,28 @@ export const pdfHandler: FormatHandler = {
 
     // Second pass: Fabric objects, page rotations/deletions, header/footer,
     // encryption, everything else.
-    return serializeEditsToPdf(workingBytes, state.pages, zoom, {
+    const outBytes = await serializeEditsToPdf(workingBytes, state.pages, zoom, {
       encryption: state.encryption,
       headerFooter: state.headerFooter,
     })
+    const outArray = outBytes instanceof Uint8Array ? outBytes : new Uint8Array(outBytes)
+
+    // Sync the serialized bytes back into state. Without this, the canvas
+    // keeps rendering the pre-save pdfBytes, so visually nothing changes
+    // even though the file on disk has the edit. Also clear the pending
+    // edit markers — they've all been flushed.
+    useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({
+      ...prev,
+      pdfBytes: outArray,
+      pages: prev.pages.map((p) => {
+        const { _paragraphEdits, _textLayerEdits, ...rest } = p as any
+        void _paragraphEdits
+        void _textLayerEdits
+        return rest
+      }),
+    }))
+
+    return outArray
   },
 
   cleanup: (tabId) => {

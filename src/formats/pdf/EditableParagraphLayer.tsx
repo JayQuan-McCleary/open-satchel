@@ -32,10 +32,10 @@ interface Props {
   height: number
 }
 
-// pdfjs fontName is an internal id like 'g_d0_f1'; not useful for the
-// browser. Until we have full embedded-font extraction (M2+), use a
-// close-matching web font. Helvetica is the most-common default.
-const EDIT_FONT_STACK = `-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif`
+// pdfParagraphs.ts now resolves fontFamily from pdfjs's styles map and
+// emits bold/italic flags, so we use those per-paragraph instead of a
+// single global stack.
+const FALLBACK_FONT_STACK = `-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif`
 
 function readPendingEditsForPage(tabId: string, pageIndex: number): ParagraphEdit[] {
   const state = useFormatStore.getState().data[tabId] as PdfFormatState | undefined
@@ -198,6 +198,8 @@ function ParagraphEditor({
   const boxW = paragraph.bbox.width * scale
   const boxH = paragraph.bbox.height * scale
   const displayFontSize = Math.max(6, paragraph.fontSize * scale)
+  // Resolved font stack from pdfjs styles, with fallback.
+  const fontStack = paragraph.fontFamily || FALLBACK_FONT_STACK
 
   return (
     <div
@@ -230,8 +232,13 @@ function ParagraphEditor({
             : 'transparent',
         color: active || isEdited ? '#000' : 'transparent',
         caretColor: '#000',
-        fontFamily: EDIT_FONT_STACK,
+        // Match the paragraph's original styling as closely as the
+        // pdfjs metadata allows. Users can see if their edit is
+        // "reading" right before they save.
+        fontFamily: fontStack,
         fontSize: displayFontSize,
+        fontWeight: paragraph.bold ? 700 : 400,
+        fontStyle: paragraph.italic ? 'italic' : 'normal',
         lineHeight: 1.2,
         padding: 0,
         overflow: 'hidden',
