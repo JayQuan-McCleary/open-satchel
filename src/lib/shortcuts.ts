@@ -3,6 +3,7 @@
 import { useTabStore } from '../stores/tabStore'
 import { useUIStore } from '../stores/uiStore'
 import { openFile, saveActiveTab, saveActiveTabAs, closeActiveTab } from './actions'
+import { undo as doUndo, redo as doRedo } from './undo-redo'
 
 type Key = { ctrl?: boolean; shift?: boolean; alt?: boolean; key: string }
 
@@ -34,6 +35,31 @@ export function registerGlobalShortcuts(): () => void {
     if (matches(e, { ctrl: true, key: 'h' })) { e.preventDefault(); useUIStore.getState().openReplace(); return }
     // Ctrl+K: command palette
     if (matches(e, { ctrl: true, key: 'k' })) { e.preventDefault(); useUIStore.getState().setCommandPaletteOpen(true); return }
+    // Ctrl+Z: undo at the APP level (paragraph / page / fabric history).
+    //
+    // We don't bail on contenteditable because our per-paragraph
+    // commit model is what the user cares about — reverting the
+    // whole paragraph they just edited, not the last keystroke. The
+    // browser's per-character undo inside the contenteditable is
+    // redundant with our edit-session snapshot pattern.
+    if (matches(e, { ctrl: true, key: 'z' })) {
+      e.preventDefault()
+      // Blur any active contenteditable first so the current edit
+      // session flushes to history before we pop. Without this,
+      // typing then Ctrl+Z would pop an EARLIER entry and leave the
+      // in-flight change orphaned.
+      const ae = document.activeElement as HTMLElement | null
+      if (ae && ae.isContentEditable) ae.blur()
+      doUndo()
+      return
+    }
+    if (matches(e, { ctrl: true, shift: true, key: 'z' }) || matches(e, { ctrl: true, key: 'y' })) {
+      e.preventDefault()
+      const ae = document.activeElement as HTMLElement | null
+      if (ae && ae.isContentEditable) ae.blur()
+      doRedo()
+      return
+    }
     // Ctrl+Tab: next tab
     if (matches(e, { ctrl: true, key: 'Tab' })) {
       e.preventDefault()

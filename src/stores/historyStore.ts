@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { PdfPageState } from '../formats/pdf'
+import type { ParagraphEdit } from '../services/pdfParagraphEdits'
 
 interface FabricEntry {
   type: 'fabric'
@@ -13,7 +14,19 @@ interface PagesEntry {
   pages: PdfPageState[]
 }
 
-export type HistoryEntry = FabricEntry | PagesEntry
+/** Paragraph-level text edit history entry. Stores BEFORE and AFTER
+ *  snapshots of a page's _paragraphEdits so we can bidirectionally
+ *  replay either state. The layer pushes one entry per commit (blur),
+ *  not per keystroke — matches tldraw's mark-on-commit pattern. */
+interface ParagraphEditsEntry {
+  type: 'paragraph_edits'
+  tabId: string
+  pageIndex: number
+  before: ParagraphEdit[] | undefined
+  after: ParagraphEdit[] | undefined
+}
+
+export type HistoryEntry = FabricEntry | PagesEntry | ParagraphEditsEntry
 
 interface HistoryState {
   undoStack: HistoryEntry[]
@@ -24,7 +37,7 @@ interface HistoryState {
   clear: () => void
 }
 
-const MAX_HISTORY = 50
+const MAX_HISTORY = 200
 
 export const useHistoryStore = create<HistoryState>((set, get) => ({
   undoStack: [],

@@ -32,6 +32,8 @@ import {
   encodeTextToBytes,
 } from './contentStreamParser'
 
+export type TextAlign = 'left' | 'center' | 'right' | 'justify'
+
 export interface ParagraphEdit {
   paragraphId: string
   /** Paragraph bbox in pdfjs viewport coords (top-left origin, scale=1). */
@@ -50,6 +52,9 @@ export interface ParagraphEdit {
   bold?: boolean
   /** True when the original paragraph was italic. */
   italic?: boolean
+  /** Alignment within the paragraph bbox. Default 'left'. 'justify' spreads
+   *  intra-word space to fill the line width (last line left-aligned). */
+  align?: TextAlign
   /** pdfjs TextLayer indices of every item that belongs to this paragraph. */
   itemIndices?: number[]
   /** Original text for each item — same length as itemIndices. */
@@ -248,25 +253,52 @@ export async function applyParagraphEditsToBytes(
     // 2. Draw new text inside the bbox.
     if (edit.newText.trim()) {
       const color = hexToRgb01(edit.color)
-      // Use the original fontSize — fallback font metrics will differ but
-      // the baseline/line spacing stays consistent with the rest of the page.
       const size = Math.max(6, Math.min(edit.fontSize, 72))
       const lineHeight = size * 1.2
       const font = pickFont(!!edit.bold, !!edit.italic)
       const lines = wrapLines(edit.newText, font, size, width)
+      const align: TextAlign = edit.align ?? 'left'
 
-      // Draw top-down. pdf-lib's y is the text baseline, so we start at
-      // the top of the bbox and step down by lineHeight per line.
+      // Compute per-line x offset for the chosen alignment. For justify
+      // we widen intra-word spaces on all lines except the last (Word-
+      // style). pdf-lib doesn't expose a native align prop across all
+      // versions, so we do the geometry ourselves using widthOfTextAtSize.
       let baselineY = pdfY + height - size
-      drawLines: for (const line of lines) {
-        if (baselineY < pdfY) break drawLines // ran out of vertical space
-        pdfPage.drawText(line, {
-          x,
-          y: baselineY,
-          size,
-          font,
-          color: rgb(color.r, color.g, color.b),
-        })
+      drawLines: for (let li = 0; li < lines.length; li++) {
+        const line = lines[li]
+        if (baselineY < pdfY) break drawLines
+
+        if (align === 'justify' && li < lines.length - 1 && line.includes(' ')) {
+          // Widen inter-word spaces to fill the full width.
+          const words = line.split(' ')
+          const wordsWidth = words.reduce(
+            (acc, w) => acc + font.widthOfTextAtSize(w, size),
+            0,
+          )
+          const gaps = words.length - 1
+          const spaceW = (width - wordsWidth) / gaps
+          let cx = x
+          for (let w = 0; w < words.length; w++) {
+            pdfPage.drawText(words[w], {
+              x: cx, y: baselineY, size, font,
+              color: rgb(color.r, color.g, color.b),
+            })
+            cx += font.widthOfTextAtSize(words[w], size) + (w < gaps ? spaceW : 0)
+          }
+        } else {
+          const lineWidth = font.widthOfTextAtSize(line, size)
+          const lineX =
+            align === 'right' ? x + (width - lineWidth)
+            : align === 'center' ? x + (width - lineWidth) / 2
+            : x // left (and justify last line)
+          pdfPage.drawText(line, {
+            x: lineX,
+            y: baselineY,
+            size,
+            font,
+            color: rgb(color.r, color.g, color.b),
+          })
+        }
         baselineY -= lineHeight
       }
     }

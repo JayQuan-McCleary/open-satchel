@@ -18,13 +18,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { useFormatStore } from '../../stores/formatStore'
 import { useTabStore } from '../../stores/tabStore'
+import { useHistoryStore } from '../../stores/historyStore'
 import {
   clusterParagraphs,
   sampleParagraphColors,
   type ParagraphBox,
   type TextItem,
 } from '../../services/pdfParagraphs'
-import type { ParagraphEdit } from '../../services/pdfParagraphEdits'
+import type { ParagraphEdit, TextAlign } from '../../services/pdfParagraphEdits'
 import type { PdfFormatState } from './index'
 
 interface Props {
@@ -151,11 +152,23 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
     return () => { cancelled = true }
   }, [pdfDoc, pageIndex])
 
+  // Snapshot of _paragraphEdits at the moment the user CLICKS INTO a
+  // paragraph. We diff against this when they leave (blur OR activeId
+  // changes) and push ONE history entry per commit — per-keystroke
+  // pushes would bloat the stack and make undo feel jumpy.
+  const editSessionBeforeRef = useRef<ParagraphEdit[] | undefined>(undefined)
+  // Mirror of activeId one-render behind so a useEffect can detect the
+  // exact transition from "something active" → "nothing active" and
+  // flush history. onBlur isn't reliable (automation, focus-steal).
+  const prevActiveIdRef = useRef<string | null>(null)
+
   const commitEdit = useCallback(
-    (para: ParagraphBox, newText: string) => {
+    (para: ParagraphBox, newText: string, overrideAlign?: TextAlign) => {
       const existing = readPendingEditsForPage(tabId, pageIndex)
       const without = existing.filter((e) => e.paragraphId !== para.id)
-      const isNoop = newText === para.originalText
+      const prevEdit = existing.find((e) => e.paragraphId === para.id)
+      const align = overrideAlign ?? prevEdit?.align
+      const isNoop = newText === para.originalText && !align
       const itemOriginalTexts = para.itemIndices.map((idx) => itemsRef.current[idx]?.str ?? '')
       const next: ParagraphEdit[] = isNoop
         ? without
@@ -167,12 +180,11 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
               originalText: para.originalText,
               newText,
               fontSize: para.fontSize,
-              // Pass sampled color through so drawText uses the right
-              // ink — white on dark headers, black on body text.
               color: para.color,
               backgroundColor: para.backgroundColor,
               bold: para.bold,
               italic: para.italic,
+              align,
               itemIndices: [...para.itemIndices],
               itemOriginalTexts,
             },
@@ -180,6 +192,68 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
       writePendingEditsForPage(tabId, pageIndex, next)
     },
     [tabId, pageIndex],
+  )
+
+  const beginEditSession = useCallback(() => {
+    editSessionBeforeRef.current = readPendingEditsForPage(tabId, pageIndex).map((e) => ({ ...e }))
+  }, [tabId, pageIndex])
+
+  const endEditSession = useCallback(() => {
+    const before = editSessionBeforeRef.current
+    editSessionBeforeRef.current = undefined
+    if (before === undefined) return
+    const after = readPendingEditsForPage(tabId, pageIndex).map((e) => ({ ...e }))
+    if (JSON.stringify(before) === JSON.stringify(after)) return
+    useHistoryStore.getState().pushUndo({
+      type: 'paragraph_edits',
+      tabId,
+      pageIndex,
+      before,
+      after,
+    })
+  }, [tabId, pageIndex])
+
+  // Activation watcher: on any change to activeId, start or end the
+  // edit session. Covers the automation case where programmatic
+  // .blur() doesn't fire React's synthetic onBlur, AND keeps a single
+  // source of truth for session lifecycle (no double-counting if the
+  // user clicks from one paragraph directly to another — activeId
+  // transitions A → null only briefly, or A → B with just one push).
+  useEffect(() => {
+    const prev = prevActiveIdRef.current
+    if (prev !== null && activeId !== prev) {
+      // Leaving a previously-active paragraph — flush.
+      endEditSession()
+    }
+    if (activeId !== null && activeId !== prev) {
+      // Entering a new paragraph.
+      beginEditSession()
+    }
+    prevActiveIdRef.current = activeId
+  }, [activeId, beginEditSession, endEditSession])
+
+  const setParagraphAlign = useCallback(
+    (para: ParagraphBox, align: TextAlign) => {
+      // Alignment changes are their own atomic history entry — snapshot
+      // before and flush after with a direct push, regardless of the
+      // active-session machinery.
+      const before = readPendingEditsForPage(tabId, pageIndex).map((e) => ({ ...e }))
+      const existing = readPendingEditsForPage(tabId, pageIndex)
+      const prev = existing.find((e) => e.paragraphId === para.id)
+      const text = prev?.newText ?? para.originalText
+      commitEdit(para, text, align)
+      const after = readPendingEditsForPage(tabId, pageIndex).map((e) => ({ ...e }))
+      if (JSON.stringify(before) !== JSON.stringify(after)) {
+        useHistoryStore.getState().pushUndo({
+          type: 'paragraph_edits',
+          tabId,
+          pageIndex,
+          before: before.length > 0 ? before : undefined,
+          after,
+        })
+      }
+    },
+    [tabId, pageIndex, commitEdit],
   )
 
   return (
@@ -207,9 +281,11 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
             active={activeId === p.id}
             isEdited={!!pending}
             initialText={text}
+            currentAlign={pending?.align ?? 'left'}
             onActivate={() => setActiveId(p.id)}
             onDeactivate={() => setActiveId(null)}
             onCommit={(newText) => commitEdit(p, newText)}
+            onAlign={(align) => setParagraphAlign(p, align)}
           />
         )
       })}
@@ -223,9 +299,11 @@ interface ParagraphEditorProps {
   active: boolean
   isEdited: boolean
   initialText: string
+  currentAlign: TextAlign
   onActivate: () => void
   onDeactivate: () => void
   onCommit: (newText: string) => void
+  onAlign: (align: TextAlign) => void
 }
 
 function ParagraphEditor({
@@ -234,9 +312,11 @@ function ParagraphEditor({
   active,
   isEdited,
   initialText,
+  currentAlign,
   onActivate,
   onDeactivate,
   onCommit,
+  onAlign,
 }: ParagraphEditorProps) {
   const divRef = useRef<HTMLDivElement>(null)
   // Shadow state so we don't rewrite the div on every commit (would reset
@@ -261,6 +341,16 @@ function ParagraphEditor({
   const fontStack = paragraph.fontFamily || FALLBACK_FONT_STACK
 
   return (
+    <>
+    {active && (
+      <AlignToolbar
+        left={left}
+        top={top}
+        width={boxW}
+        current={currentAlign}
+        onPick={onAlign}
+      />
+    )}
     <div
       style={{
         position: 'absolute',
@@ -292,13 +382,13 @@ function ParagraphEditor({
           : 'transparent',
         color: active || isEdited ? paragraph.color : 'transparent',
         caretColor: paragraph.color,
-        // Match the paragraph's original styling as closely as the
-        // pdfjs metadata allows. Users can see if their edit is
-        // "reading" right before they save.
         fontFamily: fontStack,
         fontSize: displayFontSize,
         fontWeight: paragraph.bold ? 700 : 400,
         fontStyle: paragraph.italic ? 'italic' : 'normal',
+        // Reflect alignment live in the contenteditable so the in-edit
+        // view matches what save will produce.
+        textAlign: currentAlign === 'justify' ? 'justify' : currentAlign,
         lineHeight: 1.2,
         padding: 0,
         overflow: 'hidden',
@@ -335,11 +425,95 @@ function ParagraphEditor({
           onCommit(paragraph.originalText)
           divRef.current?.blur()
         }
+        // Alignment shortcuts — Word/GDocs convention: Ctrl+L/E/R/J.
+        // ctrlKey covers both Ctrl (Win/Linux) and Cmd (macOS via metaKey)
+        // so match either.
+        const isMod = e.ctrlKey || e.metaKey
+        if (isMod) {
+          if (e.key === 'l' || e.key === 'L') { e.preventDefault(); onAlign('left') }
+          else if (e.key === 'e' || e.key === 'E') { e.preventDefault(); onAlign('center') }
+          else if (e.key === 'r' || e.key === 'R') { e.preventDefault(); onAlign('right') }
+          else if (e.key === 'j' || e.key === 'J') { e.preventDefault(); onAlign('justify') }
+        }
       }}
       contentEditable={active}
       suppressContentEditableWarning
       ref={divRef}
       data-paragraph-id={paragraph.id}
     />
+    </>
+  )
+}
+
+// ── Alignment toolbar ────────────────────────────────────────────
+// Small floating strip that appears above the active paragraph with
+// Left/Center/Right/Justify buttons. Clicking routes back to
+// setParagraphAlign which updates the edit state AND pushes a history
+// entry so the change is undoable.
+
+interface AlignToolbarProps {
+  left: number
+  top: number
+  width: number
+  current: TextAlign
+  onPick: (align: TextAlign) => void
+}
+
+function AlignToolbar({ left, top, width, current, onPick }: AlignToolbarProps) {
+  // Position toolbar just above the paragraph box. Clamp to min-top so
+  // paragraphs near the very top of the page still show the toolbar.
+  const TOOLBAR_H = 28
+  const GAP = 4
+  const toolbarTop = Math.max(2, top - TOOLBAR_H - GAP)
+  const items: { key: TextAlign; label: string; title: string }[] = [
+    { key: 'left', label: '⇤', title: 'Align left (Ctrl+L)' },
+    { key: 'center', label: '≡', title: 'Align center (Ctrl+E)' },
+    { key: 'right', label: '⇥', title: 'Align right (Ctrl+R)' },
+    { key: 'justify', label: '☰', title: 'Justify (Ctrl+J)' },
+  ]
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        left: Math.max(2, left),
+        top: toolbarTop,
+        minWidth: 120,
+        maxWidth: Math.max(120, width),
+        height: TOOLBAR_H,
+        background: 'var(--bg-surface, #1e222b)',
+        border: '1px solid var(--border, #2a2f3a)',
+        borderRadius: 4,
+        padding: '2px 4px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 2,
+        pointerEvents: 'auto',
+        zIndex: 20,
+        boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+      }}
+      // Don't steal focus from the contenteditable when clicked.
+      onMouseDown={(e) => e.preventDefault()}
+    >
+      {items.map((it) => (
+        <button
+          key={it.key}
+          title={it.title}
+          onClick={() => onPick(it.key)}
+          style={{
+            width: 28,
+            height: 22,
+            fontSize: 14,
+            lineHeight: '20px',
+            background: current === it.key ? 'var(--accent, #3b82f6)' : 'transparent',
+            color: current === it.key ? '#fff' : 'var(--text-primary, #e6e8ec)',
+            border: 'none',
+            borderRadius: 3,
+            cursor: 'pointer',
+          }}
+        >
+          {it.label}
+        </button>
+      ))}
+    </div>
   )
 }
