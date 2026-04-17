@@ -80,27 +80,44 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
   // change because pdfDoc identity then changes.
   useEffect(() => {
     let cancelled = false
-    clusterParagraphs(pdfDoc, pageIndex)
-      .then((res) => {
-        if (cancelled) return
 
-        // Once clustering is done, walk up to the sibling <canvas> on
-        // the PageRenderer and sample the rendered pixels so we can
-        // infer each paragraph's text color (white on dark header vs
-        // black on light body). Without this, every edit defaults to
-        // black and invisibly vanishes on dark-bg paragraphs.
-        let finalParagraphs = res.paragraphs
+    // Wait for the sibling canvas to signal paint completion before
+    // sampling bg colors. Previously clusterParagraphs resolved ~200ms
+    // in but the pdfjs canvas render ran ~300ms+; sampling ran against
+    // a blank white canvas and marked every paragraph as light-bg, so
+    // the save mask painted white over dark headers.
+    const waitForCanvas = async (): Promise<HTMLCanvasElement | null> => {
+      const start = Date.now()
+      const MAX_WAIT = 2500
+      while (Date.now() - start < MAX_WAIT) {
+        if (cancelled) return null
         const layer = layerRef.current
         const sibling = layer?.parentElement?.querySelector('canvas') as HTMLCanvasElement | null
-        if (sibling && sibling.width > 0) {
-          finalParagraphs = sampleParagraphColors(sibling, res.paragraphs, res.pageWidth)
+        if (sibling && sibling.width > 0 && sibling.dataset.ready === '1') return sibling
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      // Timed out; use whatever canvas exists, accept potential inaccuracy.
+      const layer = layerRef.current
+      return (layer?.parentElement?.querySelector('canvas') as HTMLCanvasElement | null) ?? null
+    }
+
+    ;(async () => {
+      try {
+        const res = await clusterParagraphs(pdfDoc, pageIndex)
+        if (cancelled) return
+        const canvas = await waitForCanvas()
+        if (cancelled) return
+        let finalParagraphs = res.paragraphs
+        if (canvas && canvas.width > 0) {
+          finalParagraphs = sampleParagraphColors(canvas, res.paragraphs, res.pageWidth)
         }
         setParagraphs(finalParagraphs)
         setBasePageSize({ w: res.pageWidth, h: res.pageHeight })
-      })
-      .catch((err) => {
+      } catch (err) {
         console.error('[EditableParagraphLayer] cluster failed:', err)
-      })
+      }
+    })()
+
     return () => {
       cancelled = true
     }

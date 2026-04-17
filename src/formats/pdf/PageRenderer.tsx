@@ -47,6 +47,11 @@ export default function PageRenderer({
     if (!canvas) return
     let cancelled = false
 
+    // Clear the readiness flag at the start of each render so sibling
+    // components (EditableParagraphLayer in particular) don't sample
+    // the PREVIOUS paint thinking it's current.
+    canvas.dataset.ready = ''
+
     const render = async () => {
       try {
         const page = await pdfDoc.getPage(pageIndex + 1)
@@ -73,16 +78,19 @@ export default function PageRenderer({
         await page.render({ canvasContext: offCtx, viewport }).promise
         if (cancelled) { page.cleanup(); return }
 
-        // Swap to visible canvas. Resizing the visible canvas clears
-        // it, so we do that atomically with the drawImage that follows
-        // — blank state is limited to microseconds inside the same JS
-        // task, never visible to the user.
         canvas.width = offscreen.width
         canvas.height = offscreen.height
         canvas.style.width = `${displayViewport.width}px`
         canvas.style.height = `${displayViewport.height}px`
         const ctx = canvas.getContext('2d')!
         ctx.drawImage(offscreen, 0, 0)
+
+        // Signal paint completion so EditableParagraphLayer can sample
+        // bg colors without racing against an unpainted canvas. Without
+        // this the sample ran while the canvas was still blank-white,
+        // which made every paragraph default to "light background" and
+        // the save masks were drawn white (erasing dark headers).
+        canvas.dataset.ready = '1'
 
         setDimensions({ width: displayViewport.width, height: displayViewport.height })
         page.cleanup()
