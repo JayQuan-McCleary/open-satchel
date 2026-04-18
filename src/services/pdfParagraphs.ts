@@ -20,6 +20,8 @@
 // ids are position-based so they're reproducible across clustering runs.
 
 import type { PDFDocumentProxy } from 'pdfjs-dist'
+import { PDFDocument } from 'pdf-lib'
+import { parseContentStream, getPageContentBytes } from './contentStreamParser'
 
 export interface TextItem {
   str: string
@@ -193,7 +195,72 @@ function isItalicName(fontName: string): boolean {
  * coordinate space (scale=1 viewport). We derive the bitmap-to-bbox
  * ratio from canvas.width / pageWidth.
  */
-export function sampleParagraphColors(
+/**
+ * Read each paragraph's TEXT color from the PDF's own content stream
+ * (the authoritative source — whatever color the author explicitly
+ * set via `rg` / `g` / `k` / `scn` before the text-showing op). No
+ * heuristics, no luminance thresholds, no canvas sampling.
+ *
+ * Returns a Map keyed by paragraph id. Paragraphs with no matching
+ * text run in the content stream are absent from the map — callers
+ * should fall back to a sensible default (we default to black
+ * elsewhere; the PDF spec's default fill is also black).
+ *
+ * Matching strategy: each content-stream text run has an (x, y) in
+ * PDF user space; each paragraph bbox is in viewport-top-left coords
+ * (scale 1). We convert the bbox to user space once per paragraph
+ * and pick the first text run that falls inside it. Fast enough for
+ * typical invoices (10-200 runs × 10-50 paragraphs) and doesn't need
+ * the index alignment that per-span blanking requires.
+ */
+export async function getParagraphTextColorsFromStream(
+  pdfBytes: Uint8Array,
+  pageIndex: number,
+  paragraphs: ParagraphBox[],
+  pageHeight: number,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  try {
+    const doc = await PDFDocument.load(pdfBytes)
+    const streamData = getPageContentBytes(doc, pageIndex)
+    if (!streamData) return out
+    const parsed = parseContentStream(streamData.bytes)
+    const toHex = (v: number) =>
+      Math.max(0, Math.min(255, Math.round(v * 255))).toString(16).padStart(2, '0')
+
+    for (const p of paragraphs) {
+      const xMin = p.bbox.x - 2
+      const xMax = p.bbox.x + p.bbox.width + 2
+      const yMinPdf = pageHeight - (p.bbox.y + p.bbox.height) - 2
+      const yMaxPdf = pageHeight - p.bbox.y + 2
+      // Pick the first run whose position is inside the bbox. Runs
+      // within a paragraph almost always share color; if they don't,
+      // the user can change it manually via the upcoming color
+      // picker.
+      const run = parsed.textRuns.find(
+        (r) => r.x >= xMin && r.x <= xMax && r.y >= yMinPdf && r.y <= yMaxPdf,
+      )
+      if (!run) continue
+      const c = run.fillColor
+      out.set(p.id, `#${toHex(c.r)}${toHex(c.g)}${toHex(c.b)}`)
+    }
+  } catch {
+    // Content stream unavailable / corrupt / compressed in an
+    // unsupported way → return empty map; callers default to black.
+  }
+  return out
+}
+
+/**
+ * Derive each paragraph's BACKGROUND color from the rendered canvas.
+ * Kept from the earlier implementation because the content stream
+ * doesn't give us an obvious "what's behind this text" — that's
+ * rasterized from fills/images/ops that happen before the text ops.
+ * The bg color is only used as the "invisible mask" we paint over
+ * the original location at save time, so approximate sampling from
+ * the pixel data above the paragraph is sufficient.
+ */
+export function sampleParagraphBackgrounds(
   canvas: HTMLCanvasElement,
   paragraphs: ParagraphBox[],
   pageWidth: number,
@@ -201,55 +268,42 @@ export function sampleParagraphColors(
   const ctx = canvas.getContext('2d')
   if (!ctx || pageWidth <= 0 || canvas.width <= 0) return paragraphs
   const scale = canvas.width / pageWidth
-  // We read the whole bbox region into an ImageData once per paragraph
-  // and inspect luminance. Sampling single pixels is flaky because the
-  // first glyph might not land exactly where we poke.
   return paragraphs.map((p) => {
     try {
-      // Sample a strip ABOVE the paragraph to read the background.
-      const bgX = Math.max(0, Math.round(p.bbox.x * scale))
-      const bgY = Math.max(0, Math.round((p.bbox.y - Math.max(2, p.fontSize * 0.3)) * scale))
-      const bgW = Math.min(canvas.width - bgX, Math.max(2, Math.round(p.bbox.width * scale)))
-      const bgH = Math.min(canvas.height - bgY, Math.max(2, Math.round(p.fontSize * 0.3 * scale)))
-      if (bgW <= 0 || bgH <= 0) return p
-      const bg = ctx.getImageData(bgX, bgY, bgW, bgH).data
-      let bgLum = 0
-      let count = 0
-      for (let i = 0; i < bg.length; i += 4) {
-        const a = bg[i + 3] / 255
-        if (a < 0.1) continue // transparent → ignore
-        const r = bg[i], g = bg[i + 1], b = bg[i + 2]
-        bgLum += (0.299 * r + 0.587 * g + 0.114 * b) / 255
-        count++
-      }
-      if (count === 0) return p
-      bgLum /= count
-      const isDark = bgLum < 0.5
-      // Compute the actual bg RGB mean so save can draw a matching
-      // rectangle over the paragraph (invisible on both dark and light
-      // backgrounds) instead of a hard-coded white rect.
-      let rSum = 0, gSum = 0, bSum = 0, cnt = 0
-      for (let i = 0; i < bg.length; i += 4) {
-        const a = bg[i + 3] / 255
+      // Median of bbox interior pixels — glyphs are the minority, so
+      // the median channel values land on the background color.
+      const bx = Math.max(0, Math.round(p.bbox.x * scale) + 1)
+      const by = Math.max(0, Math.round(p.bbox.y * scale) + 1)
+      const bw = Math.min(canvas.width - bx, Math.max(2, Math.round(p.bbox.width * scale) - 2))
+      const bh = Math.min(canvas.height - by, Math.max(2, Math.round(p.bbox.height * scale) - 2))
+      if (bw <= 0 || bh <= 0) return p
+      const data = ctx.getImageData(bx, by, bw, bh).data
+      const rs: number[] = []
+      const gs: number[] = []
+      const bs: number[] = []
+      for (let i = 0; i < data.length; i += 4) {
+        const a = data[i + 3] / 255
         if (a < 0.1) continue
-        rSum += bg[i]; gSum += bg[i + 1]; bSum += bg[i + 2]; cnt++
+        rs.push(data[i]); gs.push(data[i + 1]); bs.push(data[i + 2])
       }
-      const avgR = cnt > 0 ? rSum / cnt / 255 : 1
-      const avgG = cnt > 0 ? gSum / cnt / 255 : 1
-      const avgB = cnt > 0 ? bSum / cnt / 255 : 1
-      const toHex = (v: number) => Math.round(v * 255).toString(16).padStart(2, '0')
+      if (rs.length === 0) return p
+      const median = (arr: number[]): number => {
+        arr.sort((a, b) => a - b)
+        const mid = arr.length >> 1
+        return arr.length % 2 === 0 ? (arr[mid - 1] + arr[mid]) / 2 : arr[mid]
+      }
+      const bgR = median(rs), bgG = median(gs), bgB = median(bs)
+      const toHex = (v: number) => Math.round(v).toString(16).padStart(2, '0')
       return {
         ...p,
-        color: isDark ? '#ffffff' : '#000000',
-        onDarkBackground: isDark,
-        backgroundColor: `#${toHex(avgR)}${toHex(avgG)}${toHex(avgB)}`,
+        backgroundColor: `#${toHex(bgR)}${toHex(bgG)}${toHex(bgB)}`,
       }
     } catch {
-      // CORS-tainted canvas or other getImageData failure → leave defaults.
       return p
     }
   })
 }
+
 
 export async function clusterParagraphs(
   pdfDoc: PDFDocumentProxy,

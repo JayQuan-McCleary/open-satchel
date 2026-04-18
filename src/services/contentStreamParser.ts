@@ -54,6 +54,14 @@ export interface TextRun {
   opIndex: number
   isTJ: boolean           // true if part of a TJ array
   tjElementIndex?: number // index within TJ array
+  /** Non-stroking (fill) color in effect when this text run was emitted,
+   *  in 0-1 RGB. PDF spec default is {0,0,0} (black). We track g/rg/k
+   *  and best-effort scn; CMYK is converted to RGB naively. This is
+   *  the AUTHORITATIVE text color from the PDF source — the editor
+   *  reads it so "edit Description" re-uses the same colour the author
+   *  put on the run, regardless of the background or any luminance
+   *  heuristic. */
+  fillColor: { r: number; g: number; b: number }
 }
 
 export interface ParsedContentStream {
@@ -329,6 +337,52 @@ const TEXT_OPS = new Set([
   'Tc', 'Tw', 'Tz', 'TL', 'Ts', 'Tr', "'", '"'
 ])
 
+/** Subset of the PDF graphics state that affects text rendering. PDF
+ *  spec says the text state is also part of the full graphics stack
+ *  but our tokenizer tracks text state separately and that's been
+ *  working; this struct holds only what we need to attribute colors
+ *  to text runs. */
+interface GraphicsState {
+  /** Current non-stroking (fill) color, 0-1 RGB. Text with default
+   *  render mode (Tr 0) is filled with this color. */
+  fillColor: { r: number; g: number; b: number }
+  /** Text rendering mode (Tr). 0=fill, 1=stroke, 2=fill+stroke,
+   *  3=invisible, 4-7=clipping variants. We record it but currently
+   *  only use fill for paragraph-level color attribution. */
+  renderMode: number
+  /** Current non-stroking color space name (e.g. '/DeviceRGB',
+   *  '/DeviceGray'). Used to interpret ambiguous `scn` calls when we
+   *  see them. */
+  colorSpace: string
+}
+
+function defaultGraphicsState(): GraphicsState {
+  return {
+    fillColor: { r: 0, g: 0, b: 0 },
+    renderMode: 0,
+    colorSpace: '/DeviceGray',
+  }
+}
+
+function cloneGraphicsState(s: GraphicsState): GraphicsState {
+  return {
+    fillColor: { r: s.fillColor.r, g: s.fillColor.g, b: s.fillColor.b },
+    renderMode: s.renderMode,
+    colorSpace: s.colorSpace,
+  }
+}
+
+/** Naive CMYK→RGB. The true conversion depends on the output intent
+ *  (typically sRGB) but most PDFs we care about use DeviceRGB anyway;
+ *  this approximation is accurate enough to decide "red vs. blue"
+ *  which is all the color picker needs as a starting value. */
+function cmykToRgb(c: number, m: number, y: number, k: number): { r: number; g: number; b: number } {
+  const r = (1 - Math.min(1, c)) * (1 - Math.min(1, k))
+  const g = (1 - Math.min(1, m)) * (1 - Math.min(1, k))
+  const b = (1 - Math.min(1, y)) * (1 - Math.min(1, k))
+  return { r, g, b }
+}
+
 export function parseContentStream(bytes: Uint8Array): ParsedContentStream {
   const tokens = tokenize(bytes)
   const operators: ContentStreamOp[] = []
@@ -337,6 +391,13 @@ export function parseContentStream(bytes: Uint8Array): ParsedContentStream {
   // Text state machine
   const state: TextState = { fontName: '', fontSize: 12, x: 0, y: 0, lineX: 0, lineY: 0 }
   let inText = false
+
+  // Graphics state stack. q pushes a copy; Q pops. Color-affecting ops
+  // mutate the top of stack. We seed with the PDF default (black fill)
+  // so any text emitted before an explicit color op is recorded as
+  // black — matches viewer behavior and the spec.
+  const gstack: GraphicsState[] = [defaultGraphicsState()]
+  const top = (): GraphicsState => gstack[gstack.length - 1]
 
   const argStack: unknown[] = []
   let argStart = -1
@@ -388,6 +449,74 @@ export function parseContentStream(bytes: Uint8Array): ParsedContentStream {
 
       const opIdx = operators.length - 1
 
+      // Update graphics state first (color / mode ops).
+      if (op === 'q') {
+        gstack.push(cloneGraphicsState(top()))
+      }
+      else if (op === 'Q') {
+        if (gstack.length > 1) gstack.pop()
+      }
+      else if (op === 'g' && args.length >= 1) {
+        const v = Number(args[0])
+        top().fillColor = { r: v, g: v, b: v }
+        top().colorSpace = '/DeviceGray'
+      }
+      else if (op === 'rg' && args.length >= 3) {
+        top().fillColor = {
+          r: Number(args[0]),
+          g: Number(args[1]),
+          b: Number(args[2]),
+        }
+        top().colorSpace = '/DeviceRGB'
+      }
+      else if (op === 'k' && args.length >= 4) {
+        top().fillColor = cmykToRgb(
+          Number(args[0]),
+          Number(args[1]),
+          Number(args[2]),
+          Number(args[3]),
+        )
+        top().colorSpace = '/DeviceCMYK'
+      }
+      else if (op === 'cs' && args.length >= 1) {
+        top().colorSpace = String(args[0])
+      }
+      else if ((op === 'scn' || op === 'sc') && args.length >= 1) {
+        // Interpret by current color space when possible; otherwise
+        // fall back to arg count as a heuristic.
+        const cs = top().colorSpace
+        if (cs === '/DeviceRGB' && args.length >= 3) {
+          top().fillColor = {
+            r: Number(args[0]),
+            g: Number(args[1]),
+            b: Number(args[2]),
+          }
+        } else if (cs === '/DeviceCMYK' && args.length >= 4) {
+          top().fillColor = cmykToRgb(
+            Number(args[0]),
+            Number(args[1]),
+            Number(args[2]),
+            Number(args[3]),
+          )
+        } else if (cs === '/DeviceGray' && args.length >= 1 && typeof args[0] === 'number') {
+          const v = Number(args[0])
+          top().fillColor = { r: v, g: v, b: v }
+        } else if (args.length >= 3 && typeof args[0] === 'number') {
+          // Best-effort: 3 numeric args → treat as RGB.
+          top().fillColor = {
+            r: Number(args[0]),
+            g: Number(args[1]),
+            b: Number(args[2]),
+          }
+        } else if (args.length === 1 && typeof args[0] === 'number') {
+          const v = Number(args[0])
+          top().fillColor = { r: v, g: v, b: v }
+        }
+      }
+      else if (op === 'Tr' && args.length >= 1) {
+        top().renderMode = Number(args[0])
+      }
+
       // Update text state
       if (op === 'BT') { inText = true; state.x = 0; state.y = 0; state.lineX = 0; state.lineY = 0 }
       else if (op === 'ET') { inText = false }
@@ -430,6 +559,7 @@ export function parseContentStream(bytes: Uint8Array): ParsedContentStream {
             y: state.y,
             opIndex: opIdx,
             isTJ: false,
+            fillColor: { ...top().fillColor },
           })
         }
       }
@@ -448,6 +578,7 @@ export function parseContentStream(bytes: Uint8Array): ParsedContentStream {
                 opIndex: opIdx,
                 isTJ: true,
                 tjElementIndex: elIdx,
+                fillColor: { ...top().fillColor },
               })
             }
           })
@@ -468,6 +599,7 @@ export function parseContentStream(bytes: Uint8Array): ParsedContentStream {
               y: state.y,
               opIndex: opIdx,
               isTJ: false,
+              fillColor: { ...top().fillColor },
             })
           }
         }

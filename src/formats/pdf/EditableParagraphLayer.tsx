@@ -21,7 +21,8 @@ import { useTabStore } from '../../stores/tabStore'
 import { useHistoryStore } from '../../stores/historyStore'
 import {
   clusterParagraphs,
-  sampleParagraphColors,
+  getParagraphTextColorsFromStream,
+  sampleParagraphBackgrounds,
   type ParagraphBox,
   type TextItem,
 } from '../../services/pdfParagraphs'
@@ -106,11 +107,49 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
       try {
         const res = await clusterParagraphs(pdfDoc, pageIndex)
         if (cancelled) return
+        let finalParagraphs = res.paragraphs
+
+        // Authoritative text color from the PDF's own content stream.
+        // The layer-hosting format store holds the raw pdfBytes; we
+        // parse them once per page to pull graphics-state colors and
+        // attach them to each paragraph. No luminance heuristic — the
+        // color is whatever the PDF author set with rg/g/k/scn.
+        const state = useFormatStore.getState().data[tabId] as PdfFormatState | undefined
+        const pdfBytes = state?.pdfBytes
+        if (pdfBytes) {
+          try {
+            const colorMap = await getParagraphTextColorsFromStream(
+              pdfBytes,
+              pageIndex,
+              res.paragraphs,
+              res.pageHeight,
+            )
+            if (cancelled) return
+            finalParagraphs = finalParagraphs.map((p) => {
+              const c = colorMap.get(p.id)
+              if (!c) return p
+              // Luminance of the text color — used by the in-edit
+              // mask to pick dark-behind-light-text vs the reverse.
+              // Works regardless of the actual bg color.
+              const r = parseInt(c.slice(1, 3), 16) / 255
+              const g = parseInt(c.slice(3, 5), 16) / 255
+              const b = parseInt(c.slice(5, 7), 16) / 255
+              const lum = 0.299 * r + 0.587 * g + 0.114 * b
+              return { ...p, color: c, onDarkBackground: lum > 0.5 }
+            })
+          } catch (err) {
+            console.warn('[EditableParagraphLayer] text-color extract failed:', err)
+          }
+        }
+
+        // Background color for save-time mask — still sampled from
+        // canvas because the content stream doesn't give us a clean
+        // "what was painted behind this text" without replaying the
+        // graphics ops. Requires the canvas to be rendered.
         const canvas = await waitForCanvas()
         if (cancelled) return
-        let finalParagraphs = res.paragraphs
         if (canvas && canvas.width > 0) {
-          finalParagraphs = sampleParagraphColors(canvas, res.paragraphs, res.pageWidth)
+          finalParagraphs = sampleParagraphBackgrounds(canvas, finalParagraphs, res.pageWidth)
         }
         setParagraphs(finalParagraphs)
         setBasePageSize({ w: res.pageWidth, h: res.pageHeight })
