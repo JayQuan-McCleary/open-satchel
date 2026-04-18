@@ -103,8 +103,27 @@ Deliverable: Tauri 2 app that launches, opens a file dialog, loads a PDF, and re
 
 ## M4 — PDF parity pass 3 (Acrobat-tier)
 
-- [ ] MuPDF binding for exotic CMap / RTL / tagged PDF handling
-- [ ] OCR via Tesseract WASM or native binding
+- [ ] **MuPDF binding for exotic CMap / RTL / tagged PDF handling.**
+  License decision (pre-Tauri era, preserved here): MuPDF is AGPL or
+  ~$2k/yr commercial. We chose **AGPL** because Open Satchel is
+  local-only — the AGPL network-distribution clause never triggers
+  in practice, so there's zero downstream cost. Alternatives considered:
+  - **Poppler** (GPL) — infects source same as AGPL, no commercial
+    option, smaller feature surface.
+  - **PDFium** (BSD, render-only) — no edit capability. Would be a
+    fallback renderer only; still need pdfjs for text layer + search.
+  Current state: PDF rendering goes through pdfjs-dist in the WebView.
+  MuPDF is NOT wired yet. Bind when we hit an exotic PDF that pdfjs
+  can't handle (CMap fonts with custom encodings, tagged PDFs with
+  deep structure trees, complex RTL shaping edge cases).
+- [ ] **OCR via Tesseract WASM or native binding.** Chose tesseract.js
+  (current dep) over paid cloud services (Google Cloud Vision, AWS
+  Textract, Abbyy Cloud, Azure Form Recognizer — all ~$1-5k/yr for
+  moderate throughput) to preserve the local-first, no-network
+  commitment. Cloud OCR gives ~15-30% accuracy improvement on low-res
+  scans and multi-column layouts; revisit only if user demand for
+  scan accuracy outweighs the no-network promise. Not an Out-of-scope
+  item — just a deferred quality upgrade with a clear trade-off.
 - [ ] Image replacement in content stream
 - [ ] Transparency flattening
 - [ ] PDF/A validation + conversion
