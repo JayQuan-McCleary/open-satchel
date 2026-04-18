@@ -37,6 +37,20 @@ interface Props {
   width: number
   /** Displayed canvas height in CSS pixels. */
   height: number
+  /** When true, paragraph outlines are rendered and click-to-edit is
+   *  armed. When false, the layer stays MOUNTED — cluster state and
+   *  pending `_paragraphEdits` remain cached — but the outlines are
+   *  hidden and the whole layer has pointer-events:none so clicks
+   *  fall through to Fabric / the canvas. Flipping this prop is
+   *  instant because no remount / re-cluster happens.
+   *
+   *  Part of the modeless-editing refactor (docs/MODELESS.md Phase A).
+   *  Previously the layer only mounted when tool === 'edit_text' and
+   *  unmounted otherwise, which blew away cluster state on every tool
+   *  switch AND prevented annotations on other layers from being seen
+   *  because THIS layer (when mounted) covered them. Always-mount +
+   *  prop-gated visibility avoids both. */
+  active?: boolean
 }
 
 // pdfParagraphs.ts now resolves fontFamily from pdfjs's styles map and
@@ -72,7 +86,7 @@ function writePendingEditsForPage(tabId: string, pageIndex: number, edits: Parag
   void anyDirty
 }
 
-export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width, height }: Props) {
+export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width, height, active = true }: Props) {
   const [paragraphs, setParagraphs] = useState<ParagraphBox[]>([])
   const [basePageSize, setBasePageSize] = useState<{ w: number; h: number } | null>(null)
   const [activeId, setActiveId] = useState<string | null>(null)
@@ -376,11 +390,18 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
         width,
         height,
         zIndex: 5,
-        pointerEvents: 'none', // container itself is transparent; boxes enable pointer events
+        // Container is transparent by default; individual ParagraphEditor
+        // boxes each enable their own pointer-events when `active` is
+        // true. When the layer itself is inactive (tool !== 'edit_text'
+        // in modeless terms) we short-circuit by rendering no children —
+        // cluster state stays cached in React state so switching back
+        // is instant.
+        pointerEvents: 'none',
       }}
       data-testid="editable-paragraph-layer"
+      data-active={active ? '1' : '0'}
     >
-      {paragraphs.map((p) => {
+      {active && paragraphs.map((p) => {
         const pending = pendingById.get(p.id)
         const text = pending?.newText ?? p.originalText
         const committedDelta = pending?.positionDelta ?? { dx: 0, dy: 0 }

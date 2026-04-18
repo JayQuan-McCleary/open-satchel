@@ -142,14 +142,17 @@ export default function PageRenderer({
           pageHeight={dimensions.height}
         />
       )}
-      {/* FabricCanvas is ALWAYS mounted so annotations (Add Text,
-          Highlight, Draw, Shape, Stamp, etc.) stay visible across tool
-          changes. Before, flipping the tool to Edit Text unmounted the
-          whole canvas and anything drawn with it vanished from the
-          page — reported by user with a "hello" textbox that was
-          visible in Select mode but gone in Edit Text mode. The
-          `interactive` flag disables pointer capture in Edit Text so
-          clicks pass through to the paragraph editor. */}
+      {/* Modeless-editing architecture (docs/MODELESS.md Phase A).
+          Both interactive layers stay mounted regardless of the
+          current tool:
+            - FabricCanvas renders annotations; its `interactive`
+              toggle kills pointer capture when Edit Text is the
+              priority tool, so clicks pass through to the paragraph
+              editor.
+            - EditableParagraphLayer keeps its cluster state cached;
+              its `active` toggle decides whether outlines draw and
+              boxes accept clicks.
+          Tool switches are instant — no remount, no re-cluster. */}
       {dimensions && (
         <FabricCanvas
           tabId={tabId}
@@ -160,13 +163,14 @@ export default function PageRenderer({
           interactive={tool !== 'edit_text'}
         />
       )}
-      {dimensions && tool === 'edit_text' && (
+      {dimensions && (
         <EditableParagraphLayer
           tabId={tabId}
           pageIndex={pageIndex}
           pdfDoc={pdfDoc}
           width={dimensions.width}
           height={dimensions.height}
+          active={tool === 'edit_text'}
         />
       )}
       {/* Kept importable but not mounted by default — paragraph-level is
