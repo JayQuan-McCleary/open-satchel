@@ -142,17 +142,21 @@ export default function PageRenderer({
           pageHeight={dimensions.height}
         />
       )}
-      {/* Modeless-editing architecture (docs/MODELESS.md Phase A).
+      {/* Modeless-editing architecture (docs/MODELESS.md Phases A+C).
           Both interactive layers stay mounted regardless of the
-          current tool:
-            - FabricCanvas renders annotations; its `interactive`
-              toggle kills pointer capture when Edit Text is the
-              priority tool, so clicks pass through to the paragraph
-              editor.
-            - EditableParagraphLayer keeps its cluster state cached;
-              its `active` toggle decides whether outlines draw and
-              boxes accept clicks.
-          Tool switches are instant — no remount, no re-cluster. */}
+          current tool. FabricCanvas is ALWAYS interactive now — even
+          in Edit Text mode. Phase C: the FabricCanvas internally
+          flips `fc.selection = false` in edit_text to kill marquee
+          drag-select on empty area, but individual Fabric objects
+          remain clickable. Combined with paragraph boxes sitting
+          above Fabric (zIndex 5 vs 1) with their own pointer-events:
+          auto regions, the natural z-order gives us the priority
+          table from docs/MODELESS.md automatically:
+             Edit Text: paragraph box (top-z) > Fabric object > empty
+             Select:    Fabric object > paragraph box > empty
+                        (select mode: paragraph outlines hidden,
+                         so `active=false` → paragraph layer is fully
+                         pointer-events-none). */}
       {dimensions && (
         <FabricCanvas
           tabId={tabId}
@@ -160,7 +164,7 @@ export default function PageRenderer({
           width={dimensions.width}
           height={dimensions.height}
           pdfDoc={pdfDoc}
-          interactive={tool !== 'edit_text'}
+          interactive={true}
         />
       )}
       {dimensions && (

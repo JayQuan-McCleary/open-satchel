@@ -255,6 +255,19 @@ export default function FabricCanvas({ tabId, pageIndex, width, height, pdfDoc, 
     })
 
     switch (tool) {
+      case 'edit_text':
+        // Phase C of docs/MODELESS.md. In Edit Text mode we KEEP the
+        // Fabric canvas interactive so user-placed annotations (Add
+        // Text box, sticky notes, shapes, etc.) stay clickable — but
+        // we disable marquee drag-select, because dragging across
+        // empty page area should do NOTHING in text-editing mode
+        // (not start a Fabric selection). Clicking an individual
+        // Fabric object still selects it; paragraph boxes (z-index
+        // above Fabric) win first priority on overlap.
+        fc.selection = false
+        fc.skipTargetFind = false
+        fc.defaultCursor = 'default'
+        break
       case 'select': applySelectTool(fc); break
       case 'text': applyTextTool(patchedCanvas as any, textOptions, saveState); break
       case 'draw': applyDrawTool(fc, drawingOptions); break
