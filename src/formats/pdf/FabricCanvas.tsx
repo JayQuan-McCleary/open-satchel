@@ -27,6 +27,7 @@ import {
   applyFillInitialsTool, applyFillTimestampTool,
 } from '../../components/editor/FillSignTools'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
+import { shouldAutoRevertAfterDrop } from './clickDispatcher'
 
 interface Props {
   tabId: string
@@ -122,6 +123,27 @@ export default function FabricCanvas({ tabId, pageIndex, width, height, pdfDoc, 
     fc.on('object:added', saveState)
     fc.on('object:modified', saveState)
     fc.on('object:removed', saveState)
+
+    // Phase B of docs/MODELESS.md: after a drop-on-click action tool
+    // commits its object, flip back to Select. Matches Word / Docs /
+    // Notion / Canva UX where action tools are one-shot. Drag-to-
+    // create tools (draw, highlight, shape, measure) keep their tool
+    // active so the user can repeat — Acrobat-style.
+    //
+    // Defer the setTool by one tick so Fabric finishes its own
+    // post-add housekeeping (like entering text-edit mode on a new
+    // Textbox) before the tool swap.
+    fc.on('object:added', () => {
+      const currentTool = useUIStore.getState().tool
+      if (!shouldAutoRevertAfterDrop(currentTool)) return
+      setTimeout(() => {
+        // Re-check the tool in case the user already changed it.
+        if (useUIStore.getState().tool === currentTool) {
+          useUIStore.getState().setTool('select')
+        }
+      }, 30)
+    })
+
     fabricRef.current = fc
 
     return () => {

@@ -4,6 +4,7 @@ import { useTabStore } from '../stores/tabStore'
 import { useUIStore } from '../stores/uiStore'
 import { openFile, saveActiveTab, saveActiveTabAs, closeActiveTab } from './actions'
 import { undo as doUndo, redo as doRedo } from './undo-redo'
+import { shouldEscapeRevertToSelect } from '../formats/pdf/clickDispatcher'
 
 type Key = { ctrl?: boolean; shift?: boolean; alt?: boolean; key: string }
 
@@ -59,6 +60,23 @@ export function registerGlobalShortcuts(): () => void {
       if (ae && ae.isContentEditable) ae.blur()
       doRedo()
       return
+    }
+    // Escape: modeless-editing escape hatch. When the user is stuck
+    // in a non-primary tool (Highlight, Draw, Stamp, etc.) and nothing
+    // is being actively edited, revert to Select — matching the
+    // "press Esc to exit this tool" convention users expect from
+    // Figma / Canva / Notion. Does NOT fire when a paragraph is in
+    // edit mode (Escape on an active paragraph already resets its
+    // text per EditableParagraphLayer's onKeyDown handler).
+    if (e.key === 'Escape' && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+      const ae = document.activeElement as HTMLElement | null
+      if (ae && ae.isContentEditable) return  // let the paragraph editor handle it
+      const tool = useUIStore.getState().tool
+      if (shouldEscapeRevertToSelect(tool)) {
+        e.preventDefault()
+        useUIStore.getState().setTool('select')
+        return
+      }
     }
     // Ctrl+Tab: next tab
     if (matches(e, { ctrl: true, key: 'Tab' })) {
