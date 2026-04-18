@@ -142,6 +142,24 @@ export default function PageRenderer({
           pageHeight={dimensions.height}
         />
       )}
+      {/* FabricCanvas is ALWAYS mounted so annotations (Add Text,
+          Highlight, Draw, Shape, Stamp, etc.) stay visible across tool
+          changes. Before, flipping the tool to Edit Text unmounted the
+          whole canvas and anything drawn with it vanished from the
+          page — reported by user with a "hello" textbox that was
+          visible in Select mode but gone in Edit Text mode. The
+          `interactive` flag disables pointer capture in Edit Text so
+          clicks pass through to the paragraph editor. */}
+      {dimensions && (
+        <FabricCanvas
+          tabId={tabId}
+          pageIndex={pageIndex}
+          width={dimensions.width}
+          height={dimensions.height}
+          pdfDoc={pdfDoc}
+          interactive={tool !== 'edit_text'}
+        />
+      )}
       {dimensions && tool === 'edit_text' && (
         <EditableParagraphLayer
           tabId={tabId}
@@ -155,15 +173,6 @@ export default function PageRenderer({
           the primary edit UI. Span-level remains as a manual-opt fallback
           for users who need TJ-element precision. */}
       {false && <EditableTextLayer tabId={tabId} pageIndex={pageIndex} pdfDoc={pdfDoc} width={0} height={0} />}
-      {dimensions && tool !== 'edit_text' && (
-        <FabricCanvas
-          tabId={tabId}
-          pageIndex={pageIndex}
-          width={dimensions.width}
-          height={dimensions.height}
-          pdfDoc={pdfDoc}
-        />
-      )}
       {dimensions && (showRulers || showGrid) && (
         <RulersGuides
           fabricCanvas={null}

@@ -34,9 +34,14 @@ interface Props {
   width: number
   height: number
   pdfDoc?: PDFDocumentProxy | null
+  /** When false, annotations are drawn (so things added via Add Text /
+   *  Draw / Highlight don't vanish) but the canvas doesn't capture any
+   *  pointer events — clicks fall through to whatever layer is on top
+   *  (e.g. the paragraph editor). Used when Edit Text is active. */
+  interactive?: boolean
 }
 
-export default function FabricCanvas({ tabId, pageIndex, width, height, pdfDoc }: Props) {
+export default function FabricCanvas({ tabId, pageIndex, width, height, pdfDoc, interactive = true }: Props) {
   const wrapperRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const fabricRef = useRef<FabricCanvasClass | null>(null)
@@ -304,7 +309,14 @@ export default function FabricCanvas({ tabId, pageIndex, width, height, pdfDoc }
         left: 0,
         width: `${width}px`,
         height: `${height}px`,
-        zIndex: 1
+        zIndex: 1,
+        // When Edit Text is the active tool we still want to SEE
+        // annotations drawn via Add Text / Highlight / Shape / etc.
+        // — they just shouldn't intercept clicks (those go to the
+        // paragraph editor). pointerEvents:none is a one-line gate
+        // that keeps the visual layer alive without changing Fabric's
+        // internal state machine.
+        pointerEvents: interactive ? 'auto' : 'none',
       }}
     >
       <canvas ref={canvasRef} />
