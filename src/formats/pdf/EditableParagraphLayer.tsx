@@ -565,8 +565,39 @@ function ParagraphEditor({
     }
   }
 
+  // When the paragraph has been moved, the live canvas beneath still
+  // contains the ORIGINAL glyphs — they're only blanked at save time.
+  // Without a preview mask here the user sees the text at TWO places
+  // (the overlay at the new position + the raw canvas at the old one)
+  // which looks like a duplication bug. Paint an opaque rect over the
+  // original bbox in the detected background color so the preview
+  // matches what the saved PDF will show.
+  const hasMoved = localDelta.dx !== 0 || localDelta.dy !== 0
+  const origLeft = paragraph.bbox.x * scale
+  const origTop = paragraph.bbox.y * scale
   return (
     <>
+    {hasMoved && (
+      <div
+        style={{
+          position: 'absolute',
+          left: origLeft,
+          top: origTop,
+          width: boxW,
+          height: boxH,
+          background: paragraph.onDarkBackground
+            ? 'rgba(15,17,21,0.97)'
+            : 'rgba(255,255,255,0.97)',
+          // Dashed outline in a muted color marks this as the "empty"
+          // origin slot — helps the user undo or visualize where the
+          // box came from without it looking like active content.
+          outline: '1px dashed rgba(137,180,250,0.25)',
+          outlineOffset: 0,
+          pointerEvents: 'none',
+          zIndex: 4,
+        }}
+      />
+    )}
     {active && (
       <AlignToolbar
         left={left}
