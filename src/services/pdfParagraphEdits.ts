@@ -59,6 +59,13 @@ export interface ParagraphEdit {
   itemIndices?: number[]
   /** Original text for each item — same length as itemIndices. */
   itemOriginalTexts?: string[]
+  /** User-dragged displacement from the original bbox, in viewport
+   *  (scale=1) coordinates. Only the draw position moves; blanking and
+   *  masking still happen at the original bbox so ghost text is removed
+   *  from the spot it started, and the new text appears wherever the user
+   *  dropped it. dy is positive-down (viewport convention); save converts
+   *  to PDF user-space. */
+  positionDelta?: { dx: number; dy: number }
 }
 
 export interface ApplyParagraphOptions {
@@ -212,8 +219,8 @@ export async function applyParagraphEditsToBytes(
 
   for (const edit of edits) {
     // Convert viewport top-left origin → pdf user-space bottom-left origin.
-    const pdfY = pageHeight - edit.bbox.y - edit.bbox.height
-    const { x, width, height } = edit.bbox
+    const origPdfY = pageHeight - edit.bbox.y - edit.bbox.height
+    const { x: origX, width, height } = edit.bbox
 
     // Draw a MASK rectangle over the paragraph in the detected
     // BACKGROUND color. On the dark invoice header this draws a dark
@@ -228,6 +235,12 @@ export async function applyParagraphEditsToBytes(
     // save). By painting the exact bg color over the bbox, we fully
     // mask the original glyphs regardless of how the content stream
     // is structured, without any visible rect.
+    //
+    // The mask ALWAYS paints at the ORIGINAL bbox — that's where the
+    // glyphs still live after content-stream blanking does its best
+    // effort. If the paragraph was user-dragged, the text is drawn at
+    // the new position further down; no second mask is needed because
+    // we want the underlying page to show through there.
     const bg = hexToRgb01(edit.backgroundColor ?? '#ffffff')
     // Pad generously — pdfjs's item.width is the advance width and
     // doesn't cover all glyph bearings. 25% of fontSize vertically +
@@ -242,15 +255,24 @@ export async function applyParagraphEditsToBytes(
     const padX = Math.max(2, edit.fontSize * 0.15)
     const widthBuffer = Math.min(edit.fontSize * 0.3, 6)
     pdfPage.drawRectangle({
-      x: x - padX,
-      y: pdfY - padY,
+      x: origX - padX,
+      y: origPdfY - padY,
       width: width + padX * 2 + widthBuffer,
       height: height + padY * 2,
       color: rgb(bg.r, bg.g, bg.b),
       opacity: 1,
     })
 
-    // 2. Draw new text inside the bbox.
+    // Apply the user-dragged offset for text drawing only. dx is the
+    // horizontal delta in viewport units (same as bbox.x); dy is
+    // positive-down in viewport space, but PDF y is positive-up, so we
+    // subtract when converting.
+    const dx = edit.positionDelta?.dx ?? 0
+    const dy = edit.positionDelta?.dy ?? 0
+    const drawX = origX + dx
+    const drawPdfY = origPdfY - dy
+
+    // 2. Draw new text at the (possibly dragged) position.
     if (edit.newText.trim()) {
       const color = hexToRgb01(edit.color)
       const size = Math.max(6, Math.min(edit.fontSize, 72))
@@ -263,10 +285,10 @@ export async function applyParagraphEditsToBytes(
       // we widen intra-word spaces on all lines except the last (Word-
       // style). pdf-lib doesn't expose a native align prop across all
       // versions, so we do the geometry ourselves using widthOfTextAtSize.
-      let baselineY = pdfY + height - size
+      let baselineY = drawPdfY + height - size
       drawLines: for (let li = 0; li < lines.length; li++) {
         const line = lines[li]
-        if (baselineY < pdfY) break drawLines
+        if (baselineY < drawPdfY) break drawLines
 
         if (align === 'justify' && li < lines.length - 1 && line.includes(' ')) {
           // Widen inter-word spaces to fill the full width.
@@ -277,7 +299,7 @@ export async function applyParagraphEditsToBytes(
           )
           const gaps = words.length - 1
           const spaceW = (width - wordsWidth) / gaps
-          let cx = x
+          let cx = drawX
           for (let w = 0; w < words.length; w++) {
             pdfPage.drawText(words[w], {
               x: cx, y: baselineY, size, font,
@@ -288,9 +310,9 @@ export async function applyParagraphEditsToBytes(
         } else {
           const lineWidth = font.widthOfTextAtSize(line, size)
           const lineX =
-            align === 'right' ? x + (width - lineWidth)
-            : align === 'center' ? x + (width - lineWidth) / 2
-            : x // left (and justify last line)
+            align === 'right' ? drawX + (width - lineWidth)
+            : align === 'center' ? drawX + (width - lineWidth) / 2
+            : drawX // left (and justify last line)
           pdfPage.drawText(line, {
             x: lineX,
             y: baselineY,

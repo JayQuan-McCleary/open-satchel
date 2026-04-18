@@ -128,15 +128,28 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
   // the canvas is rendered at zoom — we scale the overlay to match.
   const scale = basePageSize ? width / basePageSize.w : 1
 
-  // Snapshot of pending edits so React renders the pre-typed text when a
-  // box is re-mounted (e.g. after tool toggle or tab switch).
+  // Subscribe to this page's _paragraphEdits array so the layer re-renders
+  // whenever the store changes (history undo/redo, drag-commit, or a
+  // typing commit). The selector returns the array reference — zustand
+  // triggers a re-render whenever that reference changes, which is on
+  // every writePendingEditsForPage. Children then see fresh `pending` and
+  // fresh `committedDelta` props, so positional changes from undo/redo
+  // propagate without a remount.
+  //
+  // `_paragraphEdits` is a runtime field the layer attaches to each
+  // PdfPageState; it isn't part of the formal type so we cast per-page.
+  const pageEdits = useFormatStore((s): ParagraphEdit[] | undefined => {
+    const state = s.data[tabId] as PdfFormatState | undefined
+    const page = state?.pages.find((p) => p.pageIndex === pageIndex) as
+      | (PdfFormatState['pages'][number] & { _paragraphEdits?: ParagraphEdit[] })
+      | undefined
+    return page?._paragraphEdits
+  })
+
   const pendingById = useMemo(() => {
-    const edits = readPendingEditsForPage(tabId, pageIndex)
+    const edits: ParagraphEdit[] = pageEdits ?? []
     return new Map(edits.map((e) => [e.paragraphId, e]))
-    // Depends on the store data so selectors and re-render correctly.
-    // Reading through getState() avoids subscribing to the full data map.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabId, pageIndex, paragraphs.length])
+  }, [pageEdits])
 
   // Items snapshot from the most recent cluster call. We need this at
   // commit time so each edit carries the pdfjs TextLayer indices of
@@ -168,7 +181,8 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
       const without = existing.filter((e) => e.paragraphId !== para.id)
       const prevEdit = existing.find((e) => e.paragraphId === para.id)
       const align = overrideAlign ?? prevEdit?.align
-      const isNoop = newText === para.originalText && !align
+      const positionDelta = prevEdit?.positionDelta
+      const isNoop = newText === para.originalText && !align && !positionDelta
       const itemOriginalTexts = para.itemIndices.map((idx) => itemsRef.current[idx]?.str ?? '')
       const next: ParagraphEdit[] = isNoop
         ? without
@@ -187,9 +201,64 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
               align,
               itemIndices: [...para.itemIndices],
               itemOriginalTexts,
+              positionDelta,
             },
           ]
       writePendingEditsForPage(tabId, pageIndex, next)
+    },
+    [tabId, pageIndex],
+  )
+
+  // Commit a new drag offset for this paragraph. Text, alignment, and
+  // other edit fields are preserved; only positionDelta changes. Pushes
+  // one history entry per drag (onPointerUp), not per mousemove.
+  const commitMove = useCallback(
+    (para: ParagraphBox, delta: { dx: number; dy: number }) => {
+      const before = readPendingEditsForPage(tabId, pageIndex).map((e) => ({ ...e }))
+      const existing = readPendingEditsForPage(tabId, pageIndex)
+      const without = existing.filter((e) => e.paragraphId !== para.id)
+      const prevEdit = existing.find((e) => e.paragraphId === para.id)
+      // Drop positionDelta back to undefined when it lands back at origin
+      // so isNoop cleanup still fires if text+align are also unchanged.
+      const isZero = Math.abs(delta.dx) < 0.01 && Math.abs(delta.dy) < 0.01
+      const newDelta = isZero ? undefined : delta
+      const newText = prevEdit?.newText ?? para.originalText
+      const align = prevEdit?.align
+      const isNoop = newText === para.originalText && !align && !newDelta
+      const itemOriginalTexts =
+        prevEdit?.itemOriginalTexts ??
+        para.itemIndices.map((idx) => itemsRef.current[idx]?.str ?? '')
+      const next: ParagraphEdit[] = isNoop
+        ? without
+        : [
+            ...without,
+            {
+              paragraphId: para.id,
+              bbox: para.bbox,
+              originalText: para.originalText,
+              newText,
+              fontSize: para.fontSize,
+              color: para.color,
+              backgroundColor: para.backgroundColor,
+              bold: para.bold,
+              italic: para.italic,
+              align,
+              itemIndices: [...para.itemIndices],
+              itemOriginalTexts,
+              positionDelta: newDelta,
+            },
+          ]
+      writePendingEditsForPage(tabId, pageIndex, next)
+      const after = readPendingEditsForPage(tabId, pageIndex).map((e) => ({ ...e }))
+      if (JSON.stringify(before) !== JSON.stringify(after)) {
+        useHistoryStore.getState().pushUndo({
+          type: 'paragraph_edits',
+          tabId,
+          pageIndex,
+          before: before.length > 0 ? before : undefined,
+          after,
+        })
+      }
     },
     [tabId, pageIndex],
   )
@@ -273,19 +342,24 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
       {paragraphs.map((p) => {
         const pending = pendingById.get(p.id)
         const text = pending?.newText ?? p.originalText
+        const committedDelta = pending?.positionDelta ?? { dx: 0, dy: 0 }
         return (
           <ParagraphEditor
             key={p.id}
             paragraph={p}
             scale={scale}
+            pageWidth={basePageSize?.w ?? 0}
+            pageHeight={basePageSize?.h ?? 0}
             active={activeId === p.id}
             isEdited={!!pending}
             initialText={text}
             currentAlign={pending?.align ?? 'left'}
+            committedDelta={committedDelta}
             onActivate={() => setActiveId(p.id)}
             onDeactivate={() => setActiveId(null)}
             onCommit={(newText) => commitEdit(p, newText)}
             onAlign={(align) => setParagraphAlign(p, align)}
+            onMove={(delta) => commitMove(p, delta)}
           />
         )
       })}
@@ -296,27 +370,43 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
 interface ParagraphEditorProps {
   paragraph: ParagraphBox
   scale: number
+  /** Page dimensions in viewport (scale=1) coords. Used to clamp drag so
+   *  the box can't be dragged fully off the page. */
+  pageWidth: number
+  pageHeight: number
   active: boolean
   isEdited: boolean
   initialText: string
   currentAlign: TextAlign
+  /** Committed drag offset from the store (in viewport units). Live drag
+   *  additions are layered on top while the pointer is down. */
+  committedDelta: { dx: number; dy: number }
   onActivate: () => void
   onDeactivate: () => void
   onCommit: (newText: string) => void
   onAlign: (align: TextAlign) => void
+  onMove: (delta: { dx: number; dy: number }) => void
 }
+
+// Minimum cursor travel (CSS px) before we treat a pointer-down-then-move
+// as a drag rather than a click. 3px matches browser click-jitter tolerance.
+const DRAG_THRESHOLD_PX = 3
 
 function ParagraphEditor({
   paragraph,
   scale,
+  pageWidth,
+  pageHeight,
   active,
   isEdited,
   initialText,
   currentAlign,
+  committedDelta,
   onActivate,
   onDeactivate,
   onCommit,
   onAlign,
+  onMove,
 }: ParagraphEditorProps) {
   const divRef = useRef<HTMLDivElement>(null)
   // Shadow state so we don't rewrite the div on every commit (would reset
@@ -326,19 +416,152 @@ function ParagraphEditor({
   useEffect(() => {
     const el = divRef.current
     if (!el) return
+    // While the user is actively typing, the DOM has already reflected
+    // their input and rewriting textContent here would reset the caret.
+    // The layer re-renders per-keystroke now (it subscribes to the edit
+    // store for undo/redo propagation), so the initialText prop changes
+    // often — but we only need to seed the div when the box is NOT
+    // being edited (initial mount, re-mount, or a history revert).
+    if (active) return
     if (seededRef.current !== initialText) {
       el.textContent = initialText
       seededRef.current = initialText
     }
-  }, [initialText])
+  }, [initialText, active])
 
-  const left = paragraph.bbox.x * scale
-  const top = paragraph.bbox.y * scale
+  // ── Drag state ──────────────────────────────────────────────────
+  // localDelta is the authoritative paragraph offset for this child,
+  // independent of the parent's render cycle. Initialized from the
+  // committedDelta prop (which the parent reads from the store on mount
+  // or whenever pendingById recomputes) and updated on every drag-in-
+  // progress plus on drag-end. This matters because the parent does NOT
+  // subscribe to the store, so the committedDelta prop stays stale
+  // between renders — if we cleared a pure "liveOffset" state on
+  // pointerup and relied on committedDelta for the settled position,
+  // the box would snap back to origin after release.
+  const [localDelta, setLocalDelta] = useState<{ dx: number; dy: number }>(() => committedDelta)
+  // When the store-derived prop changes value (undo/redo, tab switch),
+  // mirror it locally — but never during an active drag, so we don't
+  // fight the user mid-gesture.
+  useEffect(() => {
+    setLocalDelta((prev) => {
+      if (prev.dx === committedDelta.dx && prev.dy === committedDelta.dy) return prev
+      if (pointerRef.current?.dragging) return prev
+      return committedDelta
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [committedDelta.dx, committedDelta.dy])
+  // Pointer-session bookkeeping. Kept in a ref because these fields don't
+  // drive rendering directly — setLocalDelta does.
+  const pointerRef = useRef<{
+    startClientX: number
+    startClientY: number
+    pointerId: number
+    dragging: boolean
+    baseDelta: { dx: number; dy: number }
+  } | null>(null)
+  // onPointerUp fires before onClick for the same gesture. When we've
+  // just finished a drag we set this so the onClick handler skips
+  // activating the contenteditable (otherwise dragging a paragraph
+  // would also drop you into edit mode).
+  const justDraggedRef = useRef(false)
+
+  const clampDelta = useCallback(
+    (dx: number, dy: number): { dx: number; dy: number } => {
+      // Keep at least a small portion of the box on-page so the user
+      // can always grab it again. Clamp against pageWidth/pageHeight
+      // (which are scale=1, matching bbox units).
+      if (pageWidth <= 0 || pageHeight <= 0) return { dx, dy }
+      const minVisible = 12 // viewport units
+      const minX = minVisible - paragraph.bbox.x - paragraph.bbox.width
+      const maxX = pageWidth - paragraph.bbox.x - minVisible
+      const minY = minVisible - paragraph.bbox.y - paragraph.bbox.height
+      const maxY = pageHeight - paragraph.bbox.y - minVisible
+      return {
+        dx: Math.max(minX, Math.min(maxX, dx)),
+        dy: Math.max(minY, Math.min(maxY, dy)),
+      }
+    },
+    [pageWidth, pageHeight, paragraph.bbox.x, paragraph.bbox.y, paragraph.bbox.width, paragraph.bbox.height],
+  )
+
+  const left = (paragraph.bbox.x + localDelta.dx) * scale
+  const top = (paragraph.bbox.y + localDelta.dy) * scale
   const boxW = paragraph.bbox.width * scale
   const boxH = paragraph.bbox.height * scale
   const displayFontSize = Math.max(6, paragraph.fontSize * scale)
   // Resolved font stack from pdfjs styles, with fallback.
   const fontStack = paragraph.fontFamily || FALLBACK_FONT_STACK
+  const isDragging = pointerRef.current?.dragging === true
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    // While editing text, let the contenteditable handle pointer events
+    // normally (caret placement, text selection). Drag only applies to
+    // unopened paragraphs.
+    if (active) return
+    if (e.button !== 0) return
+    pointerRef.current = {
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      pointerId: e.pointerId,
+      dragging: false,
+      baseDelta: { dx: localDelta.dx, dy: localDelta.dy },
+    }
+    // setPointerCapture makes move/up fire on this element even when
+    // the cursor escapes the box (the user can drag way off in any
+    // direction and we still get the up event).
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId)
+    } catch {
+      // Older engines may throw if the pointer isn't captureable; fall
+      // back to window-level listeners implicitly (browsers re-target).
+    }
+  }
+
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const st = pointerRef.current
+    if (!st || st.pointerId !== e.pointerId) return
+    const rawDx = e.clientX - st.startClientX
+    const rawDy = e.clientY - st.startClientY
+    if (!st.dragging && Math.hypot(rawDx, rawDy) > DRAG_THRESHOLD_PX) {
+      st.dragging = true
+    }
+    if (st.dragging) {
+      const next = clampDelta(
+        st.baseDelta.dx + rawDx / scale,
+        st.baseDelta.dy + rawDy / scale,
+      )
+      setLocalDelta(next)
+    }
+  }
+
+  const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const st = pointerRef.current
+    if (!st || st.pointerId !== e.pointerId) return
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    } catch {
+      /* noop */
+    }
+    const wasDragging = st.dragging
+    pointerRef.current = null
+    if (wasDragging) {
+      // localDelta state may not have flushed yet (synthetic events fire
+      // in the same sync tick; React batches). Recompute from the ref's
+      // baseDelta + raw pointer delta so we write the authoritative
+      // position to the store regardless of whether React has
+      // re-rendered.
+      const rawDx = e.clientX - st.startClientX
+      const rawDy = e.clientY - st.startClientY
+      const finalDelta = clampDelta(
+        st.baseDelta.dx + rawDx / scale,
+        st.baseDelta.dy + rawDy / scale,
+      )
+      setLocalDelta(finalDelta)
+      onMove(finalDelta)
+      justDraggedRef.current = true
+    }
+  }
 
   return (
     <>
@@ -359,28 +582,33 @@ function ParagraphEditor({
         width: boxW,
         minHeight: boxH,
         pointerEvents: 'auto',
-        cursor: active ? 'text' : 'pointer',
-        // Thin outline always visible in edit mode — Acrobat-style
-        // bounding-box affordance. Active box gets a solid accent outline;
-        // edited boxes get a distinctive color so the user can see what's
-        // been changed but not yet saved.
+        cursor: active ? 'text' : isDragging ? 'grabbing' : 'grab',
+        // While actively dragging, dim the outline so the user perceives
+        // the box as "picked up". Otherwise keep the existing three-state
+        // Acrobat-style affordance.
         outline: active
           ? '2px solid #89b4fa'
-          : isEdited
-            ? '1px solid #f59e0b'
-            : '1px dashed rgba(137,180,250,0.5)',
+          : isDragging
+            ? '2px solid #89b4fa'
+            : isEdited
+              ? '1px solid #f59e0b'
+              : '1px dashed rgba(137,180,250,0.5)',
         outlineOffset: 0,
         // When editing, mask the canvas beneath so the caret + typed
         // text are clearly visible. For dark-background paragraphs we
         // flip to a dark mask + light text; otherwise light mask +
         // dark text. This matches the saved PDF's color scheme — what
         // you see while editing is what you get after save.
-        background: active || isEdited
+        //
+        // During a drag we also show the mask so the box visually
+        // "carries" its content while in flight, matching Acrobat/Foxit
+        // behaviour where the moved block overlays whatever's underneath.
+        background: active || isEdited || isDragging
           ? paragraph.onDarkBackground
             ? 'rgba(15,17,21,0.97)'
             : 'rgba(255,255,255,0.97)'
           : 'transparent',
-        color: active || isEdited ? paragraph.color : 'transparent',
+        color: active || isEdited || isDragging ? paragraph.color : 'transparent',
         caretColor: paragraph.color,
         fontFamily: fontStack,
         fontSize: displayFontSize,
@@ -394,8 +622,25 @@ function ParagraphEditor({
         overflow: 'hidden',
         whiteSpace: 'pre-wrap',
         wordBreak: 'break-word',
+        // Suppress default text selection during drag — otherwise
+        // clicking-and-dragging would start a selection before our
+        // threshold kicks in.
+        userSelect: active ? 'text' : 'none',
+        WebkitUserSelect: active ? 'text' : 'none',
+        // Prevent the browser's native drag-ghost on text.
+        touchAction: 'none',
       }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
       onClick={() => {
+        if (justDraggedRef.current) {
+          // Click that follows a drag release — swallow it, don't
+          // activate the editor.
+          justDraggedRef.current = false
+          return
+        }
         if (!active) {
           onActivate()
           // Defer focus so the browser applies contentEditable before
