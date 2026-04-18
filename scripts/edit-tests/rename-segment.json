@@ -1,0 +1,10 @@
+{
+  "name": "rename-segment",
+  "description": "Rename \"Segment\" column header (white text on navy bar). Regression test for the content-stream color bug — the new text must stay white because the source PDF stored white, not because the bg looks dark.",
+  "page": 1,
+  "matchText": "Segment",
+  "edit": {
+    "type": "text",
+    "newText": "Division"
+  }
+}

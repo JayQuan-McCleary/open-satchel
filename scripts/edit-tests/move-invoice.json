@@ -1,0 +1,11 @@
+{
+  "name": "move-invoice",
+  "description": "Drag the dark-header title down into the body area. Exercises the position-delta save path + ghost-mask preview.",
+  "page": 1,
+  "matchText": "Q4 2026 EARNINGS REPORT",
+  "edit": {
+    "type": "move",
+    "dx": 40,
+    "dy": 120
+  }
+}

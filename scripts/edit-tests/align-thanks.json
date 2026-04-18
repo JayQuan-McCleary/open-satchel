@@ -1,0 +1,10 @@
+{
+  "name": "align-thanks",
+  "description": "Center-align a body paragraph.",
+  "page": 2,
+  "matchText": "Design is not what it looks like. Design is how it works.",
+  "edit": {
+    "type": "align",
+    "align": "center"
+  }
+}

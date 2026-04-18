@@ -1,0 +1,10 @@
+{
+  "name": "rename-chinese",
+  "description": "Replace a Chinese paragraph with different Chinese text. Tests CJK re-embedding through the save path — we expect this to show the same glyph-gap failure until we replace pd-lib's subsetter (see ROADMAP.md M3.5 note).",
+  "page": 3,
+  "matchText": "排版设计是无国界的艺术。文字的形状和空间的节奏共同塑造了阅读的体验。一份精心设计的文档能够跨越语言的障碍，以其视觉语言与读者进行交流。这是一段测试文字，用于验证简体中文字体在编辑器中的渲染和编辑行为。",
+  "edit": {
+    "type": "text",
+    "newText": "你好世界。这是新的中文文字。"
+  }
+}

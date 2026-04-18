@@ -1,0 +1,10 @@
+{
+  "name": "rename-guidance",
+  "description": "Rename the \"Guidance\" callout heading (warm gold-ish text on beige bg). Exercises non-black, non-white text color.",
+  "page": 1,
+  "matchText": "Guidance",
+  "edit": {
+    "type": "text",
+    "newText": "Outlook"
+  }
+}

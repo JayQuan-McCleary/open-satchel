@@ -1,0 +1,10 @@
+{
+  "name": "rename-title",
+  "description": "Rename the dark-header title on page 1",
+  "page": 1,
+  "matchText": "Q4 2026 EARNINGS REPORT",
+  "edit": {
+    "type": "text",
+    "newText": "Q1 2027 EARNINGS REPORT"
+  }
+}

@@ -43,3 +43,5 @@ scripts/images/*
 !scripts/fonts/.gitkeep
 !scripts/images/.gitkeep
 test-pdfs/stress.pdf
+test-pdfs/stress-edited-*.pdf
+test-pdfs/stress-diff-*.png

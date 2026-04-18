@@ -382,16 +382,20 @@ function drawPage1(page, fonts, images) {
     color: C.red, rotate: degrees(15), opacity: 0.55,
   })
 
-  // Left column — executive summary
+  // Left column — executive summary. Kept intentionally short so the
+  // text doesn't overflow into the table row below it. Earlier versions
+  // had 3 sentences that wrapped to 8 lines, and the last word collided
+  // with the "Segment" column header — clustering then merged them and
+  // "Segment" became untargetable in the editor. Stress should break
+  // the SAVE pipeline, not sabotage the tests.
   page.drawText('EXECUTIVE SUMMARY', {
     x: 40, y: H - 130, size: 10, font: fonts.notoSansBold, color: C.accent,
   })
   drawHRule(page, 40, H - 138, 150, C.accent, 1)
   const summary =
-    'Revenue grew 18% year-over-year driven by expansion into EMEA. ' +
-    'Operating margin improved 230 bps on supply-chain normalization. ' +
-    'Free cash flow reached $1.2B, funding the announced buyback.'
-  wrapAndDraw(page, summary, 40, H - 155, 170, 11, fonts.notoSansRegular, C.ink, 14)
+    'Revenue grew 18% YoY on EMEA expansion. Margin +230 bps. ' +
+    'Free cash flow reached $1.2B.'
+  wrapAndDraw(page, summary, 40, H - 155, 170, 10, fonts.notoSansRegular, C.ink, 13)
 
   // Right column — KPIs
   const kpis = [
