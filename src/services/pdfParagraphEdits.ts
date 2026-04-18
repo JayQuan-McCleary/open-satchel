@@ -26,10 +26,9 @@ import fontkit from '@pdf-lib/fontkit'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import {
   parseContentStream,
-  serializeContentStream,
   applyTextReplacement,
-  getPageContentBytes,
-  replacePageContents,
+  getPageContentLayout,
+  patchPageContentStreams,
   encodeTextToBytes,
 } from './contentStreamParser'
 import { resolveSystemFont } from './pdfFontResolution'
@@ -135,33 +134,47 @@ export async function applyParagraphEditsToBytes(
 ): Promise<Uint8Array> {
   if (edits.length === 0) return pdfBytes
 
-  // Phase 1: blank the original text by POSITION (not by index).
+  // Phase 1: blank the original text by POSITION, SURGICALLY.
   //
-  // Earlier approach tried index-based blanking via pdfjs spanIndex →
-  // parser textRun index, but those streams diverge (pdfjs emits
-  // synthetic whitespace items that the parser never sees). The fix:
-  // the parser gives each textRun a PDF-user-space (x, y); we blank
-  // every run whose position falls INSIDE the paragraph's bbox.
-  // Position-matching is robust regardless of how many synthetic items
-  // pdfjs adds, and it doesn't over-reach because the bbox is already
-  // tight to the visible glyphs.
+  // We parse the content stream, find each text run whose (x, y) falls
+  // inside a paragraph's bbox, and replace JUST that Tj / TJ operator's
+  // bytes with an empty string. The rest of the stream — filled
+  // rectangles, ExtGState references, other text runs, every byte — is
+  // preserved verbatim. The Contents array structure is kept intact
+  // too: each affected sub-stream is rewritten in place, the array of
+  // sub-stream refs is untouched.
   //
-  // Previously the "safety" variant just painted a background-color
-  // mask rect and skipped blanking altogether. That produced visually
-  // clean canvas renders but left the original text alive in the
-  // content stream, so re-entering Edit mode showed "Invoice" +
-  // "Statement" overlapping when pdfjs re-extracted text. With
-  // position-based blanking, the saved PDF has NO "Invoice" Tj in the
-  // content stream — clean extraction, clean re-edit.
+  // History of this code path:
+  //   1. First attempt — index-based blanking via pdfjs spanIndex →
+  //      parser textRun index. Unreliable because pdfjs emits synthetic
+  //      whitespace items the parser doesn't see; the indices diverge
+  //      and we'd blank the wrong run.
+  //   2. Position-based blanking + replacePageContents. Fixed the
+  //      indexing problem AND the stacked-ghost "Statement Receipt"
+  //      bug (pd-lib appends new sub-streams to Contents on each save;
+  //      writePageContentBytes only wrote to the first, letting later
+  //      entries survive blanking). But the flatten-into-single-stream
+  //      approach broke rendering of filled rectangles that sat under
+  //      edited text (FINDINGS.md #2 — editing "Segment" on the navy
+  //      table-header row caused the navy bar to render as a tiny
+  //      fragment). The exact mechanism is ambiguous — byte-identical
+  //      content in both master and edited — but the restructure is
+  //      the only variable.
+  //   3. (this version) Surgical byte-patch via patchPageContentStreams.
+  //      Changes only the bytes that belong to the blanked operators.
+  //      Preserves every other op verbatim AND the Contents array
+  //      layout, so pd-lib's subsequent append-on-draw doesn't
+  //      interact with a restructured page. This matches how Acrobat
+  //      and WPS structure edits: incremental updates on top of an
+  //      otherwise byte-for-byte original.
   let workingBytes = pdfBytes
   {
     const prebBlankDoc = await PDFDocument.load(workingBytes)
     const prebBlankPage = prebBlankDoc.getPage(pageIndex)
     const { height: pageH } = prebBlankPage.getSize()
-    const streamData = getPageContentBytes(prebBlankDoc, pageIndex)
-    if (streamData) {
-      const parsed = parseContentStream(streamData.bytes)
-      let modified = false
+    const layout = getPageContentLayout(prebBlankDoc, pageIndex)
+    if (layout) {
+      const parsed = parseContentStream(layout.bytes)
       for (const edit of edits) {
         // Convert viewport-top-left bbox → PDF user-space Y range.
         const padY = Math.max(3, edit.fontSize * 0.25)
@@ -173,20 +186,23 @@ export async function applyParagraphEditsToBytes(
         for (const run of parsed.textRuns) {
           if (run.x >= xMin && run.x <= xMax && run.y >= yMinPdf && run.y <= yMaxPdf) {
             applyTextReplacement(parsed, run.opIndex, encodeTextToBytes(''), run.tjElementIndex)
-            modified = true
           }
         }
       }
-      if (modified) {
-        const newStream = serializeContentStream(parsed.operators, streamData.bytes)
-        // replacePageContents flattens PDFArray-backed page content (which
-        // pd-lib emits after each round-trip when we call drawText) into a
-        // single stream. writePageContentBytes only wrote to the first
-        // array entry, letting text drawn into later entries (like the
-        // "Statement" we added on the previous save) survive blanking on
-        // the next save — that's the "Statement Receipt" stacked-ghost
-        // bug caught in live testing.
-        replacePageContents(prebBlankDoc, pageIndex, newStream)
+      // Collect all ops that were tagged __modified and express them as
+      // byte-range patches on the concatenated content view.
+      const patches: Array<{ start: number; end: number; replacement: Uint8Array }> = []
+      for (const op of parsed.operators) {
+        if (op.operator === '__modified') {
+          patches.push({
+            start: op.byteOffset,
+            end: op.byteOffset + op.byteLength,
+            replacement: op.args[0] as Uint8Array,
+          })
+        }
+      }
+      if (patches.length > 0) {
+        patchPageContentStreams(layout, patches)
         workingBytes = new Uint8Array(await prebBlankDoc.save())
       }
     }
@@ -335,10 +351,19 @@ export async function applyParagraphEditsToBytes(
       // we widen intra-word spaces on all lines except the last (Word-
       // style). pdf-lib doesn't expose a native align prop across all
       // versions, so we do the geometry ourselves using widthOfTextAtSize.
+      //
+      // We do NOT clip at the original bbox bottom. Acrobat and WPS both
+      // let a paragraph's content grow downward when the replacement is
+      // longer than the original (the box visually expands to fit).
+      // Earlier revisions broke out of the draw loop the moment
+      // baselineY dropped below drawPdfY, which silently dropped any
+      // wrapped lines past the first — e.g. "Q4 2026 EARNINGS REPORT"
+      // became "Q1 2027 EARNINGS" because the 2nd line "REPORT" lived
+      // below the original ~31pt title bbox. That was test fail #1 in
+      // scripts/FINDINGS.md.
       let baselineY = drawPdfY + height - size
-      drawLines: for (let li = 0; li < lines.length; li++) {
+      for (let li = 0; li < lines.length; li++) {
         const line = lines[li]
-        if (baselineY < drawPdfY) break drawLines
 
         if (align === 'justify' && li < lines.length - 1 && line.includes(' ')) {
           // Widen inter-word spaces to fill the full width.

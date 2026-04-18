@@ -995,17 +995,179 @@ export function getPageContentBytes(
 }
 
 /**
+ * Extended content-stream access that preserves the per-sub-stream
+ * layout so surgical patches can write back to the right pieces
+ * without restructuring the Page's Contents array.
+ *
+ * getPageContentBytes concatenates all sub-streams with an LF between
+ * them; `subStreams` records where each one's decoded bytes start and
+ * end in that concatenated view. A caller with a patch at global
+ * offset N finds the sub-stream containing N, converts to a local
+ * offset, and rewrites just that sub-stream — leaving the Contents
+ * array structure (and every other byte on the page, including the
+ * /GS-xxx ExtGState references) untouched.
+ *
+ * This is the piece that makes the Acrobat-style "incremental update"
+ * edit path work: only the bytes that belong to the edited Tj operator
+ * change. Earlier replacePageContents-based code flattened the array
+ * into one new stream, which under some PDFs broke rendering of
+ * filled rectangles that sat under the edited text (FINDINGS.md #2).
+ */
+export interface PageContentLayout {
+  /** Concatenated decoded bytes across every sub-stream. */
+  bytes: Uint8Array
+  isCompressed: boolean
+  subStreams: Array<{
+    stream: PDFRawStream
+    /** Decoded-bytes offset in `bytes` where this sub-stream begins. */
+    globalStart: number
+    /** Exclusive end offset. */
+    globalEnd: number
+  }>
+  /** Primary stream — in single-stream case it's the sole stream; in
+   *  multi-stream it's the first. Kept for callers that still use the
+   *  legacy `writePageContentBytes(stream, …)` API. */
+  stream: PDFRawStream
+}
+
+export function getPageContentLayout(
+  pdfDoc: PDFDocument,
+  pageIndex: number,
+): PageContentLayout | null {
+  try {
+    const page = pdfDoc.getPage(pageIndex)
+    const contentsRef = page.node.get(PDFName.of('Contents'))
+    if (!contentsRef) return null
+    const resolved = pdfDoc.context.lookup(contentsRef)
+    if (!resolved) return null
+
+    const subStreams: PageContentLayout['subStreams'] = []
+    const buf: number[] = []
+    let primary: PDFRawStream | null = null
+
+    // PDFArray of streams.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if ('size' in resolved && typeof (resolved as any).size === 'function') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const arr = resolved as any
+      for (let i = 0; i < arr.size(); i++) {
+        const ref = arr.get(i)
+        const stream = pdfDoc.context.lookup(ref) as PDFRawStream
+        if (!stream || !('getContents' in stream)) continue
+        const filterVal = stream.dict?.get(PDFName.of('Filter'))
+        const raw = stream.getContents()
+        const decoded = decodeStream(raw, filterVal)
+        const globalStart = buf.length
+        for (let j = 0; j < decoded.length; j++) buf.push(decoded[j])
+        const globalEnd = buf.length
+        buf.push(CharCode.LF)
+        subStreams.push({ stream, globalStart, globalEnd })
+        if (!primary) primary = stream
+      }
+      if (!primary) return null
+      return {
+        bytes: new Uint8Array(buf),
+        subStreams,
+        isCompressed: true,
+        stream: primary,
+      }
+    }
+
+    // Single stream.
+    const stream = resolved as PDFRawStream
+    if (!stream || !('getContents' in stream)) return null
+    const filterVal = stream.dict?.get(PDFName.of('Filter'))
+    const raw = stream.getContents()
+    const bytes = decodeStream(raw, filterVal)
+    const isCompressed = filterNames(filterVal).length > 0
+    return {
+      bytes,
+      isCompressed,
+      stream,
+      subStreams: [{ stream, globalStart: 0, globalEnd: bytes.length }],
+    }
+  } catch (err) {
+    console.warn('[contentStreamParser] getPageContentLayout failed:', err)
+    return null
+  }
+}
+
+/** Apply non-overlapping byte-range replacements to a buffer. Sorts
+ *  patches by start and splices; returns a new Uint8Array. */
+function applyPatchesToBuffer(
+  original: Uint8Array,
+  patches: Array<{ start: number; end: number; replacement: Uint8Array }>,
+): Uint8Array {
+  const sorted = [...patches].sort((a, b) => a.start - b.start)
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].start < sorted[i - 1].end) {
+      throw new Error(
+        `overlapping patches at ${sorted[i - 1].end} vs ${sorted[i].start}`,
+      )
+    }
+  }
+  const chunks: Uint8Array[] = []
+  let cursor = 0
+  for (const p of sorted) {
+    if (p.start > cursor) chunks.push(original.slice(cursor, p.start))
+    chunks.push(p.replacement)
+    cursor = p.end
+  }
+  if (cursor < original.length) chunks.push(original.slice(cursor))
+  const total = chunks.reduce((s, c) => s + c.length, 0)
+  const out = new Uint8Array(total)
+  let off = 0
+  for (const c of chunks) {
+    out.set(c, off)
+    off += c.length
+  }
+  return out
+}
+
+/**
+ * Apply byte-range patches to a page's content streams IN PLACE,
+ * preserving the Contents array structure. This is the surgical
+ * alternative to replacePageContents — only the bytes that belong to
+ * the patched operators change; every other byte (including filled-
+ * rectangle ops, ExtGState references, and other sub-streams) stays
+ * identical to the original.
+ *
+ * `patches[].start/end` are offsets into `layout.bytes` (the
+ * concatenated decoded view). This function groups them by sub-stream
+ * and rewrites each affected sub-stream independently.
+ *
+ * Assumption: no patch crosses a sub-stream boundary. Content-stream
+ * operators (Tj, TJ, drawText, etc.) are always emitted into a single
+ * stream, so this holds in practice for anything the editor produces.
+ */
+export function patchPageContentStreams(
+  layout: PageContentLayout,
+  patches: Array<{ start: number; end: number; replacement: Uint8Array }>,
+): void {
+  for (const sub of layout.subStreams) {
+    const subPatches = patches
+      .filter((p) => p.start >= sub.globalStart && p.end <= sub.globalEnd)
+      .map((p) => ({
+        start: p.start - sub.globalStart,
+        end: p.end - sub.globalStart,
+        replacement: p.replacement,
+      }))
+    if (subPatches.length === 0) continue
+    const original = layout.bytes.slice(sub.globalStart, sub.globalEnd)
+    const patched = applyPatchesToBuffer(original, subPatches)
+    writePageContentBytes(sub.stream, patched, true)
+  }
+}
+
+/**
  * Replace a page's entire Contents with a single new flate-compressed
  * stream.
  *
- * Why we need this beyond writePageContentBytes(): once pd-lib saves a
- * page and we round-trip through pd-lib-flavoured drawing ops, the page
- * Contents becomes a PDFArray of multiple streams (one per drawing
- * chunk pd-lib emitted). writePageContentBytes only touches the first
- * array entry, so content drawn in a later entry survives blanking.
- * For paragraph-edit blanking we've already concatenated all parts via
- * getPageContentBytes — the right finishing move is to stamp the merged
- * + blanked bytes back as a SINGLE stream and repoint Contents there.
+ * LEGACY — prefer `patchPageContentStreams` via `getPageContentLayout`
+ * for new code. replacePageContents flattens the Contents array into
+ * one stream; this is observably unsafe on some PDFs (see FINDINGS.md
+ * #2 — filled rectangles rendered as small fragments after the
+ * restructure). Kept for migration of older callers.
  */
 export function replacePageContents(
   pdfDoc: PDFDocument,
