@@ -27,6 +27,7 @@ export default function PageRenderer({
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const zoom = useUIStore((s) => s.zoom)
   const tool = useUIStore((s) => s.tool)
+  const readMode = useUIStore((s) => s.readMode)
   const showRulers = useUIStore((s) => s.showRulers)
   const showGrid = useUIStore((s) => s.showGrid)
   const pdfBytes = useFormatStore((s) => (s.data[tabId] as PdfFormatState | undefined)?.pdfBytes)
@@ -164,7 +165,7 @@ export default function PageRenderer({
           width={dimensions.width}
           height={dimensions.height}
           pdfDoc={pdfDoc}
-          interactive={true}
+          interactive={!readMode}
         />
       )}
       {dimensions && (
@@ -174,7 +175,7 @@ export default function PageRenderer({
           pdfDoc={pdfDoc}
           width={dimensions.width}
           height={dimensions.height}
-          active={tool === 'edit_text'}
+          active={!readMode && tool === 'edit_text'}
         />
       )}
       {/* Kept importable but not mounted by default — paragraph-level is

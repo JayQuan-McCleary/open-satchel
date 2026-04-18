@@ -3,6 +3,8 @@ import type { UIState, Tool, DrawingOptions, TextOptions } from '../types/pdf'
 
 interface UIActions {
   setCurrentPage: (page: number) => void
+  setReadMode: (read: boolean) => void
+  toggleReadMode: () => void
   setZoom: (zoom: number) => void
   zoomIn: () => void
   zoomOut: () => void
@@ -78,8 +80,11 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
   showGrid: false,
   showLayers: false,
   fallbackFontFamily: 'Helvetica' as FallbackFontFamily,
+  readMode: false,
 
   setCurrentPage: (page) => set({ currentPage: page }),
+  setReadMode: (read) => set({ readMode: read }),
+  toggleReadMode: () => set((s) => ({ readMode: !s.readMode })),
   setZoom: (zoom) => set({ zoom: Math.max(0.25, Math.min(4.0, zoom)) }),
   zoomIn: () =>
     set((state) => {

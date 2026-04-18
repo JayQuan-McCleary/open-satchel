@@ -102,4 +102,10 @@ export interface UIState {
   // when the original embedded font can't be re-used. Kept in sync with
   // pdf-lib StandardFonts names.
   fallbackFontFamily: 'Helvetica' | 'TimesRoman' | 'Courier'
+  /** Phase D of docs/MODELESS.md — Read mode. When true, all editing
+   *  chrome is suppressed: paragraph outlines hidden, Fabric objects
+   *  rendered but non-interactive, no tool actions fire. The PDF is
+   *  viewable like any other reader. Flipping back to `false` returns
+   *  to the last-active edit tool. */
+  readMode: boolean
 }

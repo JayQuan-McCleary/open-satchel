@@ -105,6 +105,14 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
           <>
             <RibbonGroup label="Select">
               <RBtn text="Select" active={ui.tool === 'select'} onClick={() => ui.setTool('select')} />
+              {/* Phase D (docs/MODELESS.md): Read mode toggle. When on,
+                  paragraph outlines are hidden, Fabric annotations are
+                  view-only, all tools no-op. User can flip back to edit
+                  any time. Placed in the Select group so it's the very
+                  first affordance a user sees on the Home ribbon. */}
+              <RBtn text={ui.readMode ? '✎ Edit' : '👁 Read'}
+                active={ui.readMode}
+                onClick={() => ui.toggleReadMode()} />
             </RibbonGroup>
             <RibbonGroup label="Text">
               <RBtn text="Edit Text" active={ui.tool === 'edit_text'}
