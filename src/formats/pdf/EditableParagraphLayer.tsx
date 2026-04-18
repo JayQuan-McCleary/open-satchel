@@ -427,6 +427,66 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
     [tabId, pageIndex, commitEdit],
   )
 
+  // Phase E — contextual toolbar props. Both callbacks push their own
+  // history entry so each font-size or color tweak can be undone
+  // atomically, without getting bundled into the running edit-session
+  // snapshot from commitEdit.
+  const updateFieldOnEdit = useCallback(
+    (para: ParagraphBox, patch: Partial<ParagraphEdit>) => {
+      const before = readPendingEditsForPage(tabId, pageIndex).map((e) => ({ ...e }))
+      const existing = readPendingEditsForPage(tabId, pageIndex)
+      const without = existing.filter((e) => e.paragraphId !== para.id)
+      const prev = existing.find((e) => e.paragraphId === para.id)
+      const itemOriginalTexts =
+        prev?.itemOriginalTexts ??
+        para.itemIndices.map((idx) => itemsRef.current[idx]?.str ?? '')
+      const merged: ParagraphEdit = {
+        paragraphId: para.id,
+        bbox: para.bbox,
+        originalText: para.originalText,
+        newText: prev?.newText ?? para.originalText,
+        fontSize: prev?.fontSize ?? para.fontSize,
+        color: prev?.color ?? para.color,
+        backgroundColor: prev?.backgroundColor ?? para.backgroundColor,
+        bold: prev?.bold ?? para.bold,
+        italic: prev?.italic ?? para.italic,
+        fontFamily: prev?.fontFamily ?? para.fontFamily,
+        align: prev?.align,
+        itemIndices: [...para.itemIndices],
+        itemOriginalTexts,
+        positionDelta: prev?.positionDelta,
+        ...patch,
+      }
+      const next = [...without, merged]
+      writePendingEditsForPage(tabId, pageIndex, next)
+      const after = readPendingEditsForPage(tabId, pageIndex).map((e) => ({ ...e }))
+      if (JSON.stringify(before) !== JSON.stringify(after)) {
+        useHistoryStore.getState().pushUndo({
+          type: 'paragraph_edits',
+          tabId,
+          pageIndex,
+          before: before.length > 0 ? before : undefined,
+          after,
+        })
+      }
+    },
+    [tabId, pageIndex],
+  )
+
+  const setParagraphFontSize = useCallback(
+    (para: ParagraphBox, fontSize: number) => {
+      updateFieldOnEdit(para, { fontSize })
+    },
+    [updateFieldOnEdit],
+  )
+
+  const setParagraphColor = useCallback(
+    (para: ParagraphBox, color: string) => {
+      updateFieldOnEdit(para, { color })
+    },
+    [updateFieldOnEdit],
+  )
+
   return (
     <div
       ref={layerRef}
@@ -452,6 +512,8 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
         const pending = pendingById.get(p.id)
         const text = pending?.newText ?? p.originalText
         const committedDelta = pending?.positionDelta ?? { dx: 0, dy: 0 }
+        const currentFontSize = pending?.fontSize ?? p.fontSize
+        const currentColor = pending?.color ?? p.color
         return (
           <ParagraphEditor
             key={p.id}
@@ -464,11 +526,15 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
             initialText={text}
             currentAlign={pending?.align ?? 'left'}
             committedDelta={committedDelta}
+            currentFontSize={currentFontSize}
+            currentColor={currentColor}
             onActivate={() => setActiveId(p.id)}
             onDeactivate={() => setActiveId(null)}
             onCommit={(newText) => commitEdit(p, newText)}
             onAlign={(align) => setParagraphAlign(p, align)}
             onMove={(delta) => commitMove(p, delta)}
+            onFontSize={(size) => setParagraphFontSize(p, size)}
+            onColor={(hex) => setParagraphColor(p, hex)}
           />
         )
       })}
@@ -495,6 +561,11 @@ interface ParagraphEditorProps {
   onCommit: (newText: string) => void
   onAlign: (align: TextAlign) => void
   onMove: (delta: { dx: number; dy: number }) => void
+  /** Phase E (docs/MODELESS.md): contextual toolbar tweaks. */
+  currentFontSize: number
+  currentColor: string
+  onFontSize: (size: number) => void
+  onColor: (hex: string) => void
 }
 
 // Minimum cursor travel (CSS px) before we treat a pointer-down-then-move
@@ -516,6 +587,10 @@ function ParagraphEditor({
   onCommit,
   onAlign,
   onMove,
+  currentFontSize,
+  currentColor,
+  onFontSize,
+  onColor,
 }: ParagraphEditorProps) {
   const divRef = useRef<HTMLDivElement>(null)
   // Shadow state so we don't rewrite the div on every commit (would reset
@@ -712,12 +787,16 @@ function ParagraphEditor({
       />
     )}
     {active && (
-      <AlignToolbar
+      <ParagraphContextToolbar
         left={left}
         top={top}
         width={boxW}
-        current={currentAlign}
-        onPick={onAlign}
+        currentAlign={currentAlign}
+        currentFontSize={currentFontSize}
+        currentColor={currentColor}
+        onAlign={onAlign}
+        onFontSize={onFontSize}
+        onColor={onColor}
       />
     )}
     <div
@@ -836,75 +915,146 @@ function ParagraphEditor({
   )
 }
 
-// ── Alignment toolbar ────────────────────────────────────────────
-// Small floating strip that appears above the active paragraph with
-// Left/Center/Right/Justify buttons. Clicking routes back to
-// setParagraphAlign which updates the edit state AND pushes a history
-// entry so the change is undoable.
+// ── Paragraph context toolbar ────────────────────────────────────
+// Phase E of docs/MODELESS.md. Floating strip that appears above the
+// active paragraph, ALONGSIDE the main ribbon (not replacing it) —
+// matches Word's "mini-toolbar" and Google Docs' selection toolbar.
+// Provides quick access to the edits a user is most likely to make
+// after selecting a paragraph: alignment, font size, and text color.
+//
+// The ribbon still owns discovery (all 38 tools, complex options);
+// this toolbar is for the common-case tweaks once you've already
+// activated a paragraph.
 
-interface AlignToolbarProps {
+const FONT_SIZES = [6, 8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 48, 60, 72]
+
+interface ParagraphContextToolbarProps {
   left: number
   top: number
   width: number
-  current: TextAlign
-  onPick: (align: TextAlign) => void
+  currentAlign: TextAlign
+  currentFontSize: number
+  currentColor: string
+  onAlign: (align: TextAlign) => void
+  onFontSize: (size: number) => void
+  onColor: (hex: string) => void
 }
 
-function AlignToolbar({ left, top, width, current, onPick }: AlignToolbarProps) {
+function ParagraphContextToolbar({
+  left,
+  top,
+  width,
+  currentAlign,
+  currentFontSize,
+  currentColor,
+  onAlign,
+  onFontSize,
+  onColor,
+}: ParagraphContextToolbarProps) {
   // Position toolbar just above the paragraph box. Clamp to min-top so
   // paragraphs near the very top of the page still show the toolbar.
-  const TOOLBAR_H = 28
+  const TOOLBAR_H = 30
   const GAP = 4
   const toolbarTop = Math.max(2, top - TOOLBAR_H - GAP)
-  const items: { key: TextAlign; label: string; title: string }[] = [
+  const aligns: { key: TextAlign; label: string; title: string }[] = [
     { key: 'left', label: '⇤', title: 'Align left (Ctrl+L)' },
     { key: 'center', label: '≡', title: 'Align center (Ctrl+E)' },
     { key: 'right', label: '⇥', title: 'Align right (Ctrl+R)' },
     { key: 'justify', label: '☰', title: 'Justify (Ctrl+J)' },
   ]
+  // Snap current font size to the nearest preset for the dropdown,
+  // so a 10.5pt original displays as "10" without surprising the
+  // user with a non-preset number in the select box.
+  const sizeOptions = FONT_SIZES.includes(Math.round(currentFontSize))
+    ? FONT_SIZES
+    : [...FONT_SIZES, Math.round(currentFontSize)].sort((a, b) => a - b)
   return (
     <div
       style={{
         position: 'absolute',
         left: Math.max(2, left),
         top: toolbarTop,
-        minWidth: 120,
-        maxWidth: Math.max(120, width),
+        minWidth: 230,
+        maxWidth: Math.max(260, width),
         height: TOOLBAR_H,
         background: 'var(--bg-surface, #1e222b)',
         border: '1px solid var(--border, #2a2f3a)',
         borderRadius: 4,
-        padding: '2px 4px',
+        padding: '2px 6px',
         display: 'flex',
         alignItems: 'center',
-        gap: 2,
+        gap: 4,
         pointerEvents: 'auto',
         zIndex: 20,
         boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
       }}
-      // Don't steal focus from the contenteditable when clicked.
+      // Don't steal focus from the contenteditable when clicking inside
+      // the toolbar itself.
       onMouseDown={(e) => e.preventDefault()}
+      data-testid="paragraph-context-toolbar"
     >
-      {items.map((it) => (
+      {/* Alignment */}
+      {aligns.map((it) => (
         <button
           key={it.key}
           title={it.title}
-          onClick={() => onPick(it.key)}
+          onClick={() => onAlign(it.key)}
           style={{
-            width: 28,
+            width: 26,
             height: 22,
             fontSize: 14,
             lineHeight: '20px',
-            background: current === it.key ? 'var(--accent, #3b82f6)' : 'transparent',
-            color: current === it.key ? '#fff' : 'var(--text-primary, #e6e8ec)',
+            background: currentAlign === it.key ? 'var(--accent, #3b82f6)' : 'transparent',
+            color: currentAlign === it.key ? '#fff' : 'var(--text-primary, #e6e8ec)',
             border: 'none',
             borderRadius: 3,
             cursor: 'pointer',
+            padding: 0,
           }}
         >
           {it.label}
         </button>
       ))}
+      <div style={{ width: 1, height: 18, background: 'var(--border, #2a2f3a)' }} />
+      {/* Font size */}
+      <select
+        title="Font size"
+        value={Math.round(currentFontSize)}
+        onChange={(e) => onFontSize(Number(e.target.value))}
+        style={{
+          width: 54,
+          height: 22,
+          fontSize: 11,
+          padding: '0 4px',
+          background: 'transparent',
+          color: 'var(--text-primary, #e6e8ec)',
+          border: '1px solid var(--border, #2a2f3a)',
+          borderRadius: 3,
+          cursor: 'pointer',
+        }}
+      >
+        {sizeOptions.map((s) => (
+          <option key={s} value={s}>{s}pt</option>
+        ))}
+      </select>
+      <div style={{ width: 1, height: 18, background: 'var(--border, #2a2f3a)' }} />
+      {/* Text color */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 3 }} title="Text color">
+        <span style={{ fontSize: 10, color: 'var(--text-secondary, #9aa0aa)' }}>A</span>
+        <input
+          type="color"
+          value={currentColor || '#000000'}
+          onChange={(e) => onColor(e.target.value)}
+          style={{
+            width: 22,
+            height: 18,
+            border: 'none',
+            cursor: 'pointer',
+            padding: 0,
+            background: 'transparent',
+          }}
+        />
+      </div>
     </div>
   )
 }
