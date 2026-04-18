@@ -36,3 +36,10 @@ Thumbs.db
 # Test output
 coverage
 .nyc_output
+
+# Stress-test generator cache + output (all reproducible from the script)
+scripts/fonts/*
+scripts/images/*
+!scripts/fonts/.gitkeep
+!scripts/images/.gitkeep
+test-pdfs/stress.pdf
