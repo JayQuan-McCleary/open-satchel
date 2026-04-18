@@ -4,6 +4,58 @@ Rewrite status. Milestone-by-milestone, with verifiable shippable slices.
 
 ---
 
+## Current parity vs Acrobat Pro — snapshot 2026-04-18
+
+Point-in-time honest estimate of where we stand against Acrobat Pro
+on the PDF side. Target for v1 is **90-95%** in every "daily-use"
+row. The "full surface" table tracks the Acrobat features we *could*
+reach eventually (everything not in the "Explicitly out of scope"
+section at the bottom of this file); they're lower priority than
+nailing the top ~10 things real users touch every day.
+
+### What real users do every day — ~75-80% today
+
+| Area | Was | Now | Acrobat delta (to close) |
+|---|---|---|---|
+| View / navigate / search | 90% | 90% | bookmarks editor, thumbnails drag UX |
+| Paragraph text editing | 55% | 85% | image move, font subsetter (CJK), proper resize handles |
+| Annotations (highlight / shape / sticky / stamp) | 75% | 80% | richer stamp library, comment threads |
+| Sign (self-signed) | 75% | 75% | certified signatures, timestamp authority |
+| Fill forms | 65% | 65% | better auto-detect, JS calc fields (JS is OUT of scope — see bottom) |
+| Basic page ops (rotate / delete / reorder / merge / split) | 75% | 75% | — |
+| Undo/redo | 70% | 90% | — |
+
+The paragraph-editing row jumped this session — content-stream color
+extraction, surgical byte-patch save, modeless layer architecture,
+cross-page activeId fix. What was brittle is now genuinely solid.
+
+### Full Acrobat Pro surface — ~45-55% today
+
+| Area | Status |
+|---|---|
+| Image editing (move / resize / replace in content stream) | 0% |
+| Font subsetter for CJK / RTL save | broken — embeds full 11 MB fonts |
+| Export to Word / Excel / PowerPoint | 0% |
+| PDF/A validation + conversion | 0% |
+| Accessibility (tags, alt-text, reading order) | 0% |
+| Redaction true-burn | uncertain — needs audit |
+| Preflight | 0% (and see Out-of-scope section) |
+| Certify / permissions / stronger encryption | partial |
+| OCR | exists (Tesseract) — quality unknown |
+| Batch operations | exists — coverage thin |
+
+Three specific blockers masquerading as "close enough":
+
+1. **Font subsetter for CJK/Arabic.** Edit one Chinese character, save
+   a 100 KB PDF, get 11 MB back. Unshippable for international users.
+   ROADMAP M3.5 (below) has the full writeup.
+2. **Image move.** Common-case need; still 0%.
+3. **Redaction true-burn audit.** If redact paints over text without
+   removing it from the content stream, redacted docs aren't really
+   redacted. Needs verification before any user claim of redaction.
+
+---
+
 ## M1 — Scaffold + PDF viewer ✅ THIS COMMIT
 
 Deliverable: Tauri 2 app that launches, opens a file dialog, loads a PDF, and renders all pages via pdfjs-dist in the WebView.
