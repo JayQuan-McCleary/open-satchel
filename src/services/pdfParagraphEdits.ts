@@ -22,6 +22,7 @@
 //     import), we skip the whiteout and use the real embedded font.
 
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib'
+import fontkit from '@pdf-lib/fontkit'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import {
   parseContentStream,
@@ -31,6 +32,7 @@ import {
   replacePageContents,
   encodeTextToBytes,
 } from './contentStreamParser'
+import { resolveSystemFont } from './pdfFontResolution'
 
 export type TextAlign = 'left' | 'center' | 'right' | 'justify'
 
@@ -47,6 +49,11 @@ export interface ParagraphEdit {
   /** Background color hex (sampled from canvas — used for the "whiteout"
    *  rect which is actually whatever-color-the-background-is to blend in). */
   backgroundColor?: string
+  /** Resolved CSS font family from the original paragraph's pdfjs
+   *  styles map (e.g. "'Helvetica', -apple-system, ..."). Used by the
+   *  save pipeline to look up a matching installed system font for
+   *  re-embedding; null/missing → Helvetica Standard fallback. */
+  fontFamily?: string
   /** True when the original paragraph was bold/heading; save picks a
    *  bold variant of the fallback font to preserve visual weight. */
   bold?: boolean
@@ -186,35 +193,78 @@ export async function applyParagraphEditsToBytes(
   }
 
   const doc = await PDFDocument.load(workingBytes)
+  // pd-lib needs fontkit to embed non-Standard (TrueType/OpenType) fonts.
+  // Registering is cheap and safe to call unconditionally; if fontkit
+  // itself fails to init (rare; happens on very old bundlers) we catch
+  // and the resolveSystemFont path returns null → Standard fallback.
+  try {
+    doc.registerFontkit(fontkit as unknown as Parameters<typeof doc.registerFontkit>[0])
+  } catch {
+    /* noop — fallback path handles missing fontkit */
+  }
   const pdfPage = doc.getPage(pageIndex)
   const { height: pageHeight } = pdfPage.getSize()
 
   const fallbackName = options.fallbackFont ?? 'Helvetica'
-  // Pre-embed all four style variants so we can pick per-edit based on
-  // the paragraph's detected bold/italic flags. Only the requested
-  // variants actually get written into the output; pdf-lib lazy-
-  // serializes embedded fonts.
-  const fontPlain = await doc.embedFont(StandardFonts[fallbackName])
-  const fontBold = await doc.embedFont(
+  // Pre-embed all four Standard-font style variants as a GUARANTEED
+  // fallback. Only the variants actually referenced get serialized
+  // (pdf-lib lazy-writes). System-font resolution below may supersede
+  // these per-edit when a matching family is installed.
+  const fontStandardPlain = await doc.embedFont(StandardFonts[fallbackName])
+  const fontStandardBold = await doc.embedFont(
     fallbackName === 'Helvetica' ? StandardFonts.HelveticaBold
       : fallbackName === 'TimesRoman' ? StandardFonts.TimesRomanBold
       : StandardFonts.CourierBold,
   )
-  const fontItalic = await doc.embedFont(
+  const fontStandardItalic = await doc.embedFont(
     fallbackName === 'Helvetica' ? StandardFonts.HelveticaOblique
       : fallbackName === 'TimesRoman' ? StandardFonts.TimesRomanItalic
       : StandardFonts.CourierOblique,
   )
-  const fontBoldItalic = await doc.embedFont(
+  const fontStandardBoldItalic = await doc.embedFont(
     fallbackName === 'Helvetica' ? StandardFonts.HelveticaBoldOblique
       : fallbackName === 'TimesRoman' ? StandardFonts.TimesRomanBoldItalic
       : StandardFonts.CourierBoldOblique,
   )
-  const pickFont = (bold: boolean, italic: boolean): PDFFont => {
-    if (bold && italic) return fontBoldItalic
-    if (bold) return fontBold
-    if (italic) return fontItalic
-    return fontPlain
+  const pickStandard = (bold: boolean, italic: boolean): PDFFont => {
+    if (bold && italic) return fontStandardBoldItalic
+    if (bold) return fontStandardBold
+    if (italic) return fontStandardItalic
+    return fontStandardPlain
+  }
+
+  // Per-save cache of embedded system fonts, keyed by resolver id. A
+  // page with many paragraphs that share a family only embeds bytes
+  // once, and pd-lib's embedFont is ~20 KB of work per call so this
+  // matters for multi-hundred-paragraph pages.
+  const systemFontCache = new Map<string, PDFFont>()
+  const pickFontFor = async (edit: ParagraphEdit): Promise<PDFFont> => {
+    // Resolve the original paragraph's font family against the user's
+    // installed fonts. The paragraph stores its fontFamily as a CSS
+    // stack ("'Helvetica', -apple-system, ..."); pdfFontResolution
+    // picks off the primary name and matches by family + style.
+    const family = edit.fontFamily
+    if (!family) return pickStandard(!!edit.bold, !!edit.italic)
+    try {
+      const resolved = await resolveSystemFont(family, !!edit.bold, !!edit.italic)
+      if (!resolved) return pickStandard(!!edit.bold, !!edit.italic)
+      const cached = systemFontCache.get(resolved.id)
+      if (cached) return cached
+      // pd-lib's embedFont(bytes) produces a CustomFont; subset:false
+      // embeds the full font file, which maximizes glyph coverage for
+      // edits that type characters the original paragraph didn't
+      // contain (e.g. adding an em-dash to a subset that only had
+      // ASCII). Output size grows by the font's real size, typically
+      // 30-300 KB per variant — acceptable trade for fidelity.
+      const embedded = await doc.embedFont(resolved.bytes, { subset: false })
+      systemFontCache.set(resolved.id, embedded)
+      return embedded
+    } catch {
+      // Any failure (font file corrupt, fontkit doesn't like it) →
+      // Standard fallback. Better to render SOMETHING legible than
+      // to crash the save.
+      return pickStandard(!!edit.bold, !!edit.italic)
+    }
   }
 
   for (const edit of edits) {
@@ -277,7 +327,7 @@ export async function applyParagraphEditsToBytes(
       const color = hexToRgb01(edit.color)
       const size = Math.max(6, Math.min(edit.fontSize, 72))
       const lineHeight = size * 1.2
-      const font = pickFont(!!edit.bold, !!edit.italic)
+      const font = await pickFontFor(edit)
       const lines = wrapLines(edit.newText, font, size, width)
       const align: TextAlign = edit.align ?? 'left'
 
