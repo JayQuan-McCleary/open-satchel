@@ -92,6 +92,18 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
   const [activeId, setActiveId] = useState<string | null>(null)
   const layerRef = useRef<HTMLDivElement>(null)
 
+  // When the layer goes inactive (tool flipped away from Edit Text) we
+  // clear the per-paragraph active focus. Without this, reactivating
+  // Edit Text later would remount the ParagraphEditor for the stale
+  // activeId with active=true — and the seeding effect's `if (active)
+  // return` guard would skip filling textContent from the pending
+  // edit, leaving the caret in a visibly empty box. Acrobat's Edit
+  // Text tool also deactivates the current caret when you switch
+  // tools — matching behavior.
+  useEffect(() => {
+    if (!active && activeId !== null) setActiveId(null)
+  }, [active, activeId])
+
   // Cluster paragraphs once per (pdfDoc, pageIndex). Re-runs if pdfBytes
   // change because pdfDoc identity then changes.
   useEffect(() => {
@@ -484,7 +496,13 @@ function ParagraphEditor({
     // store for undo/redo propagation), so the initialText prop changes
     // often — but we only need to seed the div when the box is NOT
     // being edited (initial mount, re-mount, or a history revert).
-    if (active) return
+    //
+    // Exception: if the caller claims `active` but the div is EMPTY,
+    // this is a freshly-remounted editor (tool flip brought the layer
+    // back, the paragraph is still active, and we haven't seeded yet).
+    // The caret-reset concern doesn't apply because there's no caret
+    // to preserve — we'd just be filling an empty box with its text.
+    if (active && el.textContent && el.textContent.length > 0) return
     if (seededRef.current !== initialText) {
       el.textContent = initialText
       seededRef.current = initialText
