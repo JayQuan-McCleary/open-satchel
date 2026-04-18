@@ -140,3 +140,41 @@ Deliverable: Tauri 2 app that launches, opens a file dialog, loads a PDF, and re
 - v1.1: SQLite browser + Archives (zip/tar/7z/rar)
 - v1.2: Email (eml/mbox), YAML/TOML/XML, Subtitles
 - v1.3: Everything else
+
+---
+
+## Explicitly out of scope (won't build)
+
+Features Acrobat Pro has that Open Satchel deliberately isn't chasing.
+Documented here so future contributors (and future-me) don't
+re-litigate every six months.
+
+- **Rich media (embedded audio/video playback).** Historical security
+  liability — the single biggest PDF malware vector of 2007-2013.
+  Adobe themselves deprecated Flash support in 2020 and most
+  enterprises disable rich media in their readers. Near-zero user
+  demand; competitors (Xodo, PDFgear, Apple Preview, Foxit consumer)
+  all skip it and nobody notices.
+- **3D models (U3D / PRC).** Format specs haven't been updated since
+  2007 (U3D) and PRC is licensed. No maintained open-source renderer
+  exists. Audience is a niche of aerospace / automotive / medical-
+  training document producers who have dedicated tooling already.
+- **CAD layer navigation.** Different product category. Users doing
+  real CAD work use AutoCAD / Solidworks / Fusion 360; a PDF editor
+  that half-implements CAD would be a worse AutoCAD, not a better
+  PDF editor.
+- **PostScript rendering / print production (ICC, ink simulation,
+  trap, overprint preview).** Professional print-shop concerns.
+  Adobe and Enfocus own this market; the audience pays five figures
+  for dedicated preflight tools.
+- **Preflight profiles + PDF/X validation.** Same reasoning as above
+  — print production is a separate industry.
+- **Acrobat-style JavaScript automation in forms.** Form calculation
+  JS is a security surface and almost always a sign that the workflow
+  should live in a real app, not a PDF. Basic form fields (text,
+  checkbox, radio, dropdown, signature) are in scope; JS is not.
+
+If a user says "I need PDF editor that does X" where X is on this
+list, the honest answer is "use Acrobat Pro for this one" — we're
+not trying to be everything Acrobat is, we're trying to be better
+at the 80% of PDF work real people do.
