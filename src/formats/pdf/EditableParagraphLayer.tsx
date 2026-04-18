@@ -104,6 +104,41 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
     if (!active && activeId !== null) setActiveId(null)
   }, [active, activeId])
 
+  // Cross-layer activation hygiene. Each page gets its own layer
+  // instance with its own `activeId` state. When the user clicks a
+  // paragraph on page 2, page 1's layer doesn't know — its
+  // `activeId` stays pinned to whatever was last active on page 1,
+  // leaving a stale contentEditable that the DOM happily returns
+  // from querySelector('[contenteditable="true"]'). In live UX this
+  // doesn't usually bite because the user clicks ONE paragraph at a
+  // time and the prior one loses focus, but: (a) blur events don't
+  // fire reliably when the focused element scrolls out of view or
+  // is remounted, and (b) programmatic tests hit this constantly.
+  // Solution: every layer listens at the document level for
+  // pointerdown; if the hit target isn't inside THIS layer's own
+  // DOM subtree, clear local activeId. O(N_visible_pages) listeners,
+  // negligible.
+  useEffect(() => {
+    if (!active) return
+    const onOutside = (e: Event) => {
+      const el = layerRef.current
+      if (!el) return
+      const target = e.target as Node | null
+      if (target && el.contains(target)) return // click inside this layer — ignore
+      setActiveId(null)
+    }
+    // Listen on both pointerdown (real user clicks) and click (covers
+    // synthesized .click() calls that bypass the pointer path — common
+    // in automation + some keyboard activation paths). Capture-phase so
+    // we fire before child handlers that might stopPropagation.
+    document.addEventListener('pointerdown', onOutside, true)
+    document.addEventListener('click', onOutside, true)
+    return () => {
+      document.removeEventListener('pointerdown', onOutside, true)
+      document.removeEventListener('click', onOutside, true)
+    }
+  }, [active])
+
   // Cluster paragraphs once per (pdfDoc, pageIndex). Re-runs if pdfBytes
   // change because pdfDoc identity then changes.
   useEffect(() => {
