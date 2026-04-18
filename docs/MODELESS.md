@@ -117,7 +117,7 @@ Action tools (Add Text, Shape, Stamp, etc.) currently stay active after use — 
 | **B** | Unified click dispatcher at PageRenderer level. Priority table implemented for the 2 primary modes + Add Text. Paragraph + Fabric share one entry point. | ~1 day | next session |
 | **C** | Auto-revert for action tools. Drop-on-click tools (Add Text, Stamp, Fill-Sign quick-stamps) revert to `select` after the drop. Drag-to-create tools (Shape, Draw, Highlight) revert after the drag ends. | ~half day | next session |
 | **D** | Read-mode toggle. Hides all edit chrome for pure viewing. | ~2 hours | later |
-| **E** | Context-sensitive toolbar. Replaces the big static ribbon with a popover that changes based on what's selected (Figma / Notion / Canva pattern). | ~2 days | later |
+| **E** | **Contextual floating toolbar alongside the ribbon** — NOT a ribbon replacement. Ribbon stays as the discoverable home for all 38 tools; we *add* a small popover that appears near the current selection (paragraph → font/size/color/align; Fabric object → fill/stroke/opacity; highlight → swatches). Matches Word's mini-toolbar, Google Docs' selection toolbar, Acrobat's contextual panel. | ~2 days | later |
 
 Phases can ship independently. A alone already fixes the reported bug and is a net UX improvement.
 
