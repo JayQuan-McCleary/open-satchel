@@ -85,8 +85,33 @@ Deliverable: Tauri 2 app that launches, opens a file dialog, loads a PDF, and re
 - [ ] Font-aware paragraph editing — prefer the original embedded font
   when available via `font.scanPdf` + `font.getBytes`. Falls back to
   user-picked system font otherwise.
-- [ ] Font subsetting at save time — a pure-Rust subset-font equivalent
-  (currently pass-through, so imported fonts embed as full files).
+- [ ] **Font subsetting at save time — CRITICAL, do NOT use pd-lib's
+  built-in subsetter for complex scripts.** Confirmed 2026-04-18 via
+  the stress-test fixture (`scripts/gen-stress-pdf.mjs`, page 3):
+  passing `{ subset: true }` to pd-lib's `embedFont` for Noto Sans SC
+  produces a PDF where Chinese text renders as sparse, wrong glyphs
+  ("这是一段中文测试" comes out "版 界 。 同 。 言"), and for Amiri
+  Arabic the shaped output is empty. Root cause: pd-lib's subsetter
+  rebuilds the cmap and layout tables naively — it drops glyphs from
+  dense CJK cmaps even when they're drawn, and for complex scripts it
+  mangles the GSUB/GPOS/morx tables that drive contextual shaping, so
+  Arabic letters never connect. For the stress fixture we work around
+  this with per-font `subset:false`, which bloats PDF size from ~100 KB
+  to ~11 MB (NotoSansSC alone is 17 MB uncompressed). This is NOT
+  acceptable for shipped save output: users will end up with
+  multi-megabyte PDFs after a one-word edit if we hit the same code
+  path. Replacement must be a pure-Rust subsetter that:
+    1. Respects the font's full cmap (no silent glyph drop)
+    2. Preserves GSUB/GPOS/morx for complex scripts
+    3. Subsets ALL used glyphs including contextual variants
+       (initial/medial/final forms for Arabic, kerning pairs, etc.)
+    4. Falls back to embed-whole for fonts whose subset would break
+  Candidate crates: `subsetter`, `harfbuzz_rs` (binds to hb-subset —
+  already battle-tested, used by Chrome/Android), or `skrifa`. Our
+  Rust side already has ttf-parser for scanning; adding hb-subset is
+  the most honest path to correct subsetting. Until this ships, the
+  save pipeline must either (a) embed whole for non-Latin scripts or
+  (b) only embed standard Latin subsets where pd-lib happens to work.
 - [ ] Box resize handles on active paragraph — Acrobat-style circular
   grips at corners + edge midpoints.
 
